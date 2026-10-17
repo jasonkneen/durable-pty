@@ -39,20 +39,13 @@ Contents: write on the tap repository; add it under Settings, Secrets and variab
 nothing and you update the tap by hand:
 
 ```
-scripts/gen-formula.sh v0.1.1 source > /path/to/homebrew-tap/Formula/dpty.rb      # private repository: builds from the tag, needs Rust
-scripts/gen-formula.sh v0.1.1 binary dist > /path/to/homebrew-tap/Formula/dpty.rb  # public repository: uses the release tarballs
+scripts/gen-formula.sh v0.1.1 binary dist > /path/to/homebrew-tap/Formula/dpty.rb   # the release tarballs (download the .sha256 files into dist/ first)
+scripts/gen-formula.sh v0.1.1 source > /path/to/homebrew-tap/Formula/dpty.rb        # build from the tag instead (needs Rust)
 ```
 
-While this repository is private the formula builds from the tagged source, fetched over ssh (`ssh://git@github.com/...`):
-Homebrew's sandboxed git has no https credentials, so an ssh key with access to the repository is required, and Homebrew's
-Rust is a build dependency. `brew fetch --formula --build-from-source jasonkneen/tap/dpty` checks the source download without
-installing anything. Once the repository is public the workflow switches to the prebuilt binaries by itself.
-
-## Making the repository public
-
-1. Settings, General, Danger zone, Change visibility. The Pages site (`docs/`) is already served from `main`.
-2. Cut a release (above) so the curl installer and the formula have something to download. After that, the install commands on the
-   site work for everyone, and the "private beta" note on the home page can be removed.
+The workflow writes the prebuilt-binary formula (no build tools needed) for a public repository, and the build-from-source
+formula for a private one. If the repository is ever private again, the sandboxed git Homebrew uses has no https credentials,
+so set `DPTY_GIT_URL=ssh://git@github.com/jasonkneen/durable-pty.git` when generating the source formula.
 
 ## The documentation site
 

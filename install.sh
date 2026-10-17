@@ -9,7 +9,7 @@
 #   DPTY_REPO          GitHub owner/name to download from (default: jasonkneen/durable-pty)
 #   DPTY_RELEASE_BASE  download from this base URL instead of GitHub (a mirror, or file:// for testing)
 #
-# While the repository is private, the download falls back to the GitHub CLI (`gh auth login` first).
+# If a download is not reachable anonymously (a private mirror), it falls back to the GitHub CLI when you are signed in.
 set -eu
 
 REPO="${DPTY_REPO:-jasonkneen/durable-pty}"
@@ -83,7 +83,7 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 
 say "downloading $asset ($VERSION)"
 if ! { fetch "$BASE/$asset" "$tmp/$asset" && fetch "$BASE/$asset.sha256" "$tmp/$asset.sha256"; } 2>/dev/null; then
-  # A private repository's releases are not reachable anonymously: use the GitHub CLI when you are signed in with it.
+  # Not reachable anonymously (for example a private mirror): use the GitHub CLI when you are signed in with it.
   if [ -z "${DPTY_RELEASE_BASE:-}" ] && command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
     say "not reachable without signing in, trying the GitHub CLI"
     tagarg=""; [ "$VERSION" = "latest" ] || tagarg="$VERSION"
@@ -91,7 +91,7 @@ if ! { fetch "$BASE/$asset" "$tmp/$asset" && fetch "$BASE/$asset.sha256" "$tmp/$
     gh release download $tagarg -R "$REPO" -p "$asset" -p "$asset.sha256" -D "$tmp" --clobber \
       || die "could not download $asset with the GitHub CLI (is there a release for $target, and do you have access to $REPO?)"
   else
-    die "could not download $BASE/$asset (is there a release for $target? A private repository needs the GitHub CLI: gh auth login)"
+    die "could not download $BASE/$asset (is there a release for $target? Check your connection and https://github.com/$REPO/releases)"
   fi
 fi
 

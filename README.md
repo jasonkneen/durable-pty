@@ -65,8 +65,7 @@ or `cargo uninstall durable-pty`). Your data stays in `~/.durable-pty` until you
 ### Releasing (maintainers)
 
 `scripts/release.sh X.Y.Z` bumps the version, rolls `CHANGELOG.md`, tests, tags and pushes; the tag builds the binaries, publishes
-them and updates the Homebrew tap. See [RELEASING.md](RELEASING.md). While the repository is private, the curl installer uses the
-GitHub CLI (`gh auth login`) to download releases, and the Homebrew formula builds from the tagged source over ssh (you need an ssh key with access to the repository).
+them and updates the Homebrew tap. See [RELEASING.md](RELEASING.md).
 
 ## License and contributing
 

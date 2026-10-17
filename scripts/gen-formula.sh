@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Writes the Homebrew formula for a release to stdout.
-#   scripts/gen-formula.sh v0.1.1 source                 build from the tagged source (works for a private repo, needs Rust)
-#   scripts/gen-formula.sh v0.1.1 binary path/to/dist    use the release tarballs (public repo only); dist holds the .sha256 files
+#   scripts/gen-formula.sh v0.1.1 source                 build from the tagged source (needs Rust; also works for a private repo)
+#   scripts/gen-formula.sh v0.1.1 binary path/to/dist    use the release tarballs (the default for releases); dist holds the .sha256 files
 set -euo pipefail
 tag="${1:?tag, e.g. v0.1.1}"; mode="${2:-source}"; dist="${3:-}"
 repo="${DPTY_REPO:-jasonkneen/durable-pty}"
-# While the repository is private, Homebrew can only fetch the source over ssh (its sandboxed git has no https credentials).
-# Set DPTY_GIT_URL=https://github.com/$repo.git once the repository is public.
-git_url="${DPTY_GIT_URL:-ssh://git@github.com/$repo.git}"
+# Source mode fetches over https. For a private repository set DPTY_GIT_URL=ssh://git@github.com/$repo.git (the sandboxed
+# git Homebrew uses has no https credentials).
+git_url="${DPTY_GIT_URL:-https://github.com/$repo.git}"
 version="${tag#v}"
 header() { cat <<RUBY
 class Dpty < Formula
