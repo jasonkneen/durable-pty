@@ -44,7 +44,7 @@ pub async fn dispatch(m: &Arc<Manager>, method: &str, p: Value) -> Result<Value,
         }
         "new" => {
             let req: NewReq = serde_json::from_value(p).map_err(e)?;
-            let row = m.create(req).map_err(e)?;
+            let row = m.create(req).await.map_err(e)?;
             Ok(m.describe(row))
         }
         "kill" => {
@@ -56,7 +56,7 @@ pub async fn dispatch(m: &Arc<Manager>, method: &str, p: Value) -> Result<Value,
             Ok(json!({"ok": true}))
         }
         "restart" => {
-            m.restart(s(&p, "id")?).map_err(e)?;
+            m.restart(s(&p, "id")?).await.map_err(e)?;
             Ok(json!({"ok": true}))
         }
         "send" => {
@@ -68,7 +68,12 @@ pub async fn dispatch(m: &Arc<Manager>, method: &str, p: Value) -> Result<Value,
             if let Some(b) = opt_s(&p, "b64") {
                 bytes.extend(base64::engine::general_purpose::STANDARD.decode(b).map_err(e)?);
             }
-            if p.get("enter").and_then(|v| v.as_bool()).unwrap_or(false) {
+            // Text followed by Enter in a single write is read by full-screen TUIs as a paste, and the Enter becomes a
+            // newline in the input box instead of submitting (Codex waits for input to go quiet first). Send the Enter on its
+            // own after a pause: `enter_delay_ms` (default 150 ms for shells, 1.5 s for agents).
+            let enter = p.get("enter").and_then(|v| v.as_bool()).unwrap_or(false);
+            let separate_enter = enter && !bytes.is_empty();
+            if enter && !separate_enter {
                 bytes.push(b'\r');
             }
             if let Some(Value::Array(keys)) = p.get("keys") {
@@ -78,7 +83,16 @@ pub async fn dispatch(m: &Arc<Manager>, method: &str, p: Value) -> Result<Value,
                 }
             }
             live.write_input(&bytes).map_err(e)?;
-            Ok(json!({"sent": bytes.len()}))
+            let mut sent = bytes.len();
+            if separate_enter {
+                // Agent TUIs need a longer quiet moment than a shell does before they treat Enter as a submit.
+                let agent = m.row(&live.id).map(|r| matches!(r.kind.as_str(), "claude" | "codex" | "grok")).unwrap_or(false);
+                let delay = p.get("enter_delay_ms").and_then(|v| v.as_u64()).unwrap_or(if agent { 1500 } else { 150 }).min(5_000);
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                live.write_input(b"\r").map_err(e)?;
+                sent += 1;
+            }
+            Ok(json!({"sent": sent}))
         }
         "resize" => {
             let live = m.running(s(&p, "id")?).map_err(e)?;
@@ -145,7 +159,7 @@ pub async fn dispatch(m: &Arc<Manager>, method: &str, p: Value) -> Result<Value,
             }
         }
         "shutdown" => {
-            m.shutdown();
+            m.shutdown(p.get("kill_sessions").and_then(|v| v.as_bool()).unwrap_or(false));
             tokio::spawn(async {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 std::process::exit(0);

@@ -1,0 +1,626 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>durable-pty — PTY sessions that outlive your app</title>
+<meta name="description" content="dpty is a PTY session daemon, CLI and MCP server. Sessions, scrollback and typed commands live in SQLite, not in your app, so a crash never takes a terminal with it.">
+<meta name="theme-color" content="#0b0d10">
+<meta property="og:title" content="durable-pty (dpty)">
+<meta property="og:description" content="PTY sessions that live in a daemon, stored in SQLite, resumed after a crash — including claude and codex agent sessions.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://jasonkneen.github.io/durable-pty/">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f6f5f2;
+    --bg-raised: #ffffff;
+    --ink: #14161a;
+    --ink-dim: #4b5058;
+    --ink-faint: #767c86;
+    --line: #dcd9d2;
+    --line-strong: #b9b4aa;
+    --accent: #0a5c36;
+    --accent-ink: #ffffff;
+    --term-bg: #121414;
+    --term-ink: #e7e9e4;
+    --term-dim: #8a9088;
+    --term-accent: #6bc78f;
+    --term-border: #262a28;
+    --ok: #0a5c36;
+    --warn: #8a5a00;
+    --bad: #8a1f1f;
+    --radius: 10px;
+    --mono: "SFMono-Regular", "JetBrains Mono", ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    --head: "Space Grotesk", var(--sans);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b0d10;
+      --bg-raised: #141719;
+      --ink: #eef0ee;
+      --ink-dim: #a9afb3;
+      --ink-faint: #767e84;
+      --line: #262a2e;
+      --line-strong: #363b40;
+      --accent: #5fd392;
+      --accent-ink: #0a140f;
+      --term-bg: #0a0b0a;
+      --term-ink: #e7e9e4;
+      --term-dim: #70766f;
+      --term-accent: #5fd392;
+      --term-border: #1c1f1d;
+      --ok: #5fd392;
+      --warn: #e3b24c;
+      --bad: #e16767;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.55;
+    overflow-x: hidden;
+  }
+  img, svg { max-width: 100%; }
+
+  a { color: var(--accent); text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
+  a:hover { text-decoration-color: currentColor; }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  h1, h2, h3 { font-family: var(--head); font-weight: 600; letter-spacing: -0.01em; color: var(--ink); margin: 0; }
+
+  .wrap {
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 0 16px;
+  }
+  @media (min-width: 640px) { .wrap { padding: 0 32px; } }
+
+  section { padding: 64px 0; border-top: 1px solid var(--line); }
+  section:first-of-type, #hero { border-top: none; }
+
+  /* ---------- top bar ---------- */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 20px 16px;
+    max-width: 920px;
+    margin: 0 auto;
+    gap: 12px;
+  }
+  @media (min-width: 640px) { .topbar { padding: 20px 32px; } }
+  .logo {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-family: var(--mono);
+    font-weight: 600;
+    font-size: 1rem;
+    color: var(--ink);
+  }
+  .logo .dot { color: var(--accent); }
+  .topnav { display: flex; gap: 18px; font-size: 0.9rem; }
+  .topnav a { color: var(--ink-dim); white-space: nowrap; }
+
+  /* ---------- hero ---------- */
+  #hero { padding-top: 32px; padding-bottom: 56px; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin: 0 0 14px;
+  }
+  h1.title { font-size: clamp(2rem, 6vw, 3.2rem); line-height: 1.08; max-width: 18ch; }
+  .promise { font-size: clamp(1.05rem, 2.6vw, 1.25rem); color: var(--ink-dim); max-width: 46ch; margin: 18px 0 32px; }
+
+  .install-methods { display: flex; flex-direction: column; gap: 14px; max-width: 600px; }
+  .install-label { font-family: var(--mono); font-size: 0.76rem; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.06em; margin: 0 0 6px; }
+  .install-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: stretch; max-width: 560px; }
+  .install-cmd {
+    flex: 1 1 320px;
+    display: flex;
+    align-items: center;
+    background: var(--term-bg);
+    border: 1px solid var(--term-border);
+    border-radius: var(--radius);
+    color: var(--term-ink);
+    font-family: var(--mono);
+    font-size: 0.92rem;
+    padding: 0 6px 0 16px;
+    min-height: 48px;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+  .install-cmd .prompt { color: var(--term-accent); margin-right: 10px; user-select: none; }
+  .install-cmd { overflow: hidden; }
+  .install-cmd .cmd-text { flex: 1 1 auto; min-width: 0; overflow-x: auto; white-space: nowrap; padding: 13px 0; scrollbar-width: thin; }
+  .install-cmd .copy-btn { flex: none; }
+  .copy-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: transparent;
+    border: 0;
+    color: var(--term-dim);
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    padding: 10px 14px;
+    cursor: pointer;
+    border-radius: 6px;
+    margin-left: auto;
+  }
+  .copy-btn:hover { color: var(--term-ink); background: rgba(255,255,255,0.06); }
+  .copy-btn[data-copied="true"] { color: var(--term-accent); }
+  .copy-btn svg { width: 14px; height: 14px; flex: none; }
+
+  .hero-note { margin-top: 14px; font-size: 0.88rem; color: var(--ink-faint); }
+
+  /* ---------- section heads ---------- */
+  .kicker {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--ink-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin: 0 0 10px;
+  }
+  h2.h2 { font-size: clamp(1.4rem, 3.4vw, 1.9rem); margin-bottom: 14px; }
+  .lede { color: var(--ink-dim); max-width: 60ch; margin: 0 0 28px; font-size: 1.02rem; }
+
+  /* ---------- crash table ---------- */
+  .crash-table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
+  .crash-table th, .crash-table td { text-align: left; padding: 14px 16px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  .crash-table th { font-family: var(--mono); font-size: 0.78rem; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
+  .crash-table td:first-child { font-weight: 600; white-space: nowrap; width: 1%; }
+  .crash-table tr:last-child td { border-bottom: none; }
+  .crash-table { display: block; overflow-x: auto; }
+  .crash-table table-inner { }
+  @media (min-width: 640px) { .crash-table { display: table; overflow-x: visible; } }
+
+  /* mobile fallback: stack as cards */
+  .crash-cards { display: flex; flex-direction: column; gap: 2px; }
+  .crash-card {
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 16px;
+    background: var(--bg-raised);
+  }
+  .crash-card + .crash-card { margin-top: 10px; }
+  .crash-card h3 { font-size: 1rem; margin-bottom: 6px; }
+  .crash-card p { margin: 0; color: var(--ink-dim); font-size: 0.94rem; }
+
+  /* ---------- terminal transcripts ---------- */
+  .term {
+    background: var(--term-bg);
+    border: 1px solid var(--term-border);
+    border-radius: var(--radius);
+    font-family: var(--mono);
+    font-size: 0.86rem;
+    line-height: 1.65;
+    overflow-x: auto;
+    box-shadow: 0 1px 0 var(--term-border);
+  }
+  .term-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--term-border);
+  }
+  .term-head .tdot { width: 9px; height: 9px; border-radius: 50%; background: var(--term-dim); opacity: 0.5; }
+  .term-head .tname { margin-left: 6px; color: var(--term-dim); font-size: 0.78rem; }
+  .term-body { padding: 16px; white-space: pre; }
+  .term-body .ln { display: block; color: var(--term-ink); }
+  .term-body .p { color: var(--term-accent); }
+  .term-body .out { color: var(--term-dim); }
+  .term + .term { margin-top: 18px; }
+
+  /* ---------- feature / surface blocks ---------- */
+  .stack { display: flex; flex-direction: column; gap: 28px; }
+  .block h3 { font-size: 1.08rem; margin-bottom: 8px; }
+  .block p { color: var(--ink-dim); margin: 0 0 10px; max-width: 64ch; }
+  code.inline {
+    font-family: var(--mono);
+    font-size: 0.88em;
+    background: var(--bg-raised);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 0.08em 0.4em;
+  }
+
+  .snippet {
+    background: var(--term-bg);
+    border: 1px solid var(--term-border);
+    border-radius: var(--radius);
+    color: var(--term-ink);
+    font-family: var(--mono);
+    font-size: 0.85rem;
+    padding: 16px;
+    overflow-x: auto;
+    white-space: pre;
+  }
+  .snippet .k { color: var(--term-accent); }
+  .snippet .s { color: #d8c893; }
+
+  ul.plain { margin: 0; padding: 0; list-style: none; }
+  ul.plain li {
+    padding: 10px 0;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    gap: 10px;
+    font-size: 0.95rem;
+  }
+  ul.plain li:last-child { border-bottom: none; }
+  ul.plain code { font-family: var(--mono); font-size: 0.88em; color: var(--accent); flex: none; }
+
+  /* ---------- architecture diagram ---------- */
+  .diagram-wrap {
+    background: var(--bg-raised);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 20px;
+    overflow-x: auto;
+  }
+  .diagram-wrap svg { display: block; margin: 0 auto; min-width: 560px; }
+  .dg-box { fill: var(--bg-raised); stroke: var(--line-strong); stroke-width: 1.2; }
+  .dg-box.accent { stroke: var(--accent); }
+  .dg-text { font-family: var(--mono); font-size: 12px; fill: var(--ink); }
+  .dg-text.dim { fill: var(--ink-faint); font-size: 11px; }
+  .dg-arrow { stroke: var(--ink-faint); stroke-width: 1.2; fill: none; marker-end: url(#arrowhead); }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .dg-pulse { animation: dgpulse 2.4s ease-in-out infinite; }
+    @keyframes dgpulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+  }
+
+  /* ---------- limits ---------- */
+  .limits-grid { display: grid; grid-template-columns: 1fr; gap: 14px; }
+  @media (min-width: 640px) { .limits-grid { grid-template-columns: 1fr 1fr; } }
+  .limit-card {
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 16px 18px;
+    background: var(--bg-raised);
+  }
+  .limit-card.no { border-left: 3px solid var(--bad); }
+  .limit-card.ok { border-left: 3px solid var(--ok); }
+  .limit-card h3 { font-size: 0.95rem; margin-bottom: 6px; }
+  .limit-card p { margin: 0; color: var(--ink-dim); font-size: 0.92rem; }
+
+  /* ---------- footer ---------- */
+  footer { border-top: 1px solid var(--line); padding: 40px 0 56px; }
+  .footer-links { display: flex; flex-wrap: wrap; gap: 18px 24px; font-size: 0.92rem; margin-bottom: 18px; }
+  .footer-fine { color: var(--ink-faint); font-size: 0.85rem; }
+
+  .icon { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.6; vertical-align: -3px; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="logo">dpty<span class="dot">.</span></div>
+  <nav class="topnav" aria-label="Section links">
+    <a href="#crashes">Crashes</a>
+    <a href="#cli">CLI</a>
+    <a href="#agents">Agents</a>
+    <a href="#surfaces">Surfaces</a>
+    <a href="#architecture">Architecture</a>
+    <a href="#limits">Limits</a>
+    <a href="getting-started.html">Getting started</a>
+    <a href="cli.html">Full CLI</a>
+    <a href="agents.html">Agents docs</a>
+    <a href="mcp-and-api.html">MCP &amp; API</a>
+    <a href="how-it-works.html">How it works</a>
+  </nav>
+</div>
+
+<main>
+<section id="hero" class="wrap">
+  <p class="eyebrow">durable-pty</p>
+  <h1 class="title">PTY sessions that outlive your app.</h1>
+  <p class="promise">dpty runs a daemon that owns your terminal sessions and writes everything — scrollback, typed commands, events — to SQLite, so a crash in your app, or even the daemon, never takes a running shell or agent with it.</p>
+
+  <div class="install-methods" role="group" aria-label="Install methods">
+    <div class="install-method">
+      <p class="install-label">Homebrew</p>
+      <div class="install-row">
+        <div class="install-cmd" data-copy-text="brew install jasonkneen/tap/dpty">
+          <span class="prompt">$</span><span class="cmd-text">brew install jasonkneen/tap/dpty</span>
+          <button class="copy-btn" type="button" aria-label="Copy Homebrew install command">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.6" fill="none"/><path d="M5 16V5a2 2 0 0 1 2-2h11" stroke="currentColor" stroke-width="1.6" fill="none"/></svg>
+            <span class="copy-label">Copy</span>
+          </button>
+        </div>
+      </div>
+    </div>
+    <div class="install-method">
+      <p class="install-label">curl</p>
+      <div class="install-row">
+        <div class="install-cmd" data-copy-text="curl -fsSL https://raw.githubusercontent.com/jasonkneen/durable-pty/main/install.sh | sh">
+          <span class="prompt">$</span><span class="cmd-text">curl -fsSL https://raw.githubusercontent.com/jasonkneen/durable-pty/main/install.sh | sh</span>
+          <button class="copy-btn" type="button" aria-label="Copy curl install command">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.6" fill="none"/><path d="M5 16V5a2 2 0 0 1 2-2h11" stroke="currentColor" stroke-width="1.6" fill="none"/></svg>
+            <span class="copy-label">Copy</span>
+          </button>
+        </div>
+      </div>
+    </div>
+    <div class="install-method">
+      <p class="install-label">From source</p>
+      <div class="install-row">
+        <div class="install-cmd" data-copy-text="cargo install --path .">
+          <span class="prompt">$</span><span class="cmd-text">cargo install --path .</span>
+          <button class="copy-btn" type="button" aria-label="Copy cargo install command">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.6" fill="none"/><path d="M5 16V5a2 2 0 0 1 2-2h11" stroke="currentColor" stroke-width="1.6" fill="none"/></svg>
+            <span class="copy-label">Copy</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="hero-note">Then run <code class="inline">dpty install</code> to start it at login. macOS (Apple silicon and Intel) and Linux (x86_64, aarch64). MIT licensed. <a href="getting-started.html">Full install guide →</a></p>
+</section>
+
+<section id="crashes" class="wrap">
+  <p class="kicker">Durability</p>
+  <h2 class="h2">What happens when things crash</h2>
+  <p class="lede">Sessions live in the daemon, not in your app. Here is exactly what survives, honestly, including the one thing it does not yet do.</p>
+
+  <div class="crash-table" role="table" aria-label="Crash behaviour">
+    <table style="width:100%; border-collapse:collapse;">
+      <thead>
+        <tr><th scope="col">Event</th><th scope="col">What happens</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Your app / browser crashes</td>
+          <td>Nothing happens to the session. Reattach by id, name or label and get the current screen, then live output.</td>
+        </tr>
+        <tr>
+          <td>Daemon crashes or restarts</td>
+          <td>Each session's shim keeps the process running on its own. The daemon reattaches on start and catches up on missed output — nothing lost. If a shim is also gone, that session is marked <code class="inline">lost</code> and relaunched per its restart policy (default for agents: <code class="inline">on-failure</code>), same id, history kept.</td>
+        </tr>
+        <tr>
+          <td>Machine reboots or you log out</td>
+          <td>The processes themselves die — nothing can stop that. Sessions and their history survive in SQLite and are restored the next time the daemon starts.</td>
+        </tr>
+        <tr>
+          <td>A session keeps crash-looping</td>
+          <td>Capped at 5 automatic restarts per 60 seconds, then dpty gives up and records the session as <code class="inline">restart-loop</code> instead of retrying forever.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="hero-note" style="margin-top:20px;">Each session has its own small helper process — a shim — that owns the PTY and the running process, so the process itself keeps running through a daemon restart; see <a href="#architecture">architecture</a>. A machine reboot or logout still ends it; nothing can prevent that.</p>
+</section>
+
+<section id="cli" class="wrap">
+  <p class="kicker">Command line</p>
+  <h2 class="h2">The CLI, as it actually runs</h2>
+  <p class="lede">Real transcripts, not screenshots. The first command starts the daemon if it is not already running.</p>
+
+  <div class="stack">
+    <div class="term" role="group" aria-label="Starting and listing sessions">
+      <div class="term-head"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span><span class="tname">zsh</span></div>
+      <div class="term-body"><span class="ln"><span class="p">$</span> dpty new -n work -C ~/proj -- claude "fix the bug"</span><span class="ln out">attached to work (session 4f0c…) — Ctrl-\ to detach</span><span class="ln"><span class="p">$</span> dpty ls</span><span class="ln out">NAME   STATUS    CMD                      CWD</span><span class="ln out">work   running   claude "fix the bug"      ~/proj</span></div>
+    </div>
+
+    <div class="term" role="group" aria-label="Sending input and waiting for output">
+      <div class="term-head"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span><span class="tname">zsh</span></div>
+      <div class="term-body"><span class="ln"><span class="p">$</span> dpty send work "npm test"</span><span class="ln out">sent</span><span class="ln"><span class="p">$</span> dpty wait work "passed" --timeout 60</span><span class="ln out">matched "passed" at 00:00:12</span><span class="ln"><span class="p">$</span> dpty screen work</span><span class="ln out">… last screen of the work session, as currently drawn …</span></div>
+    </div>
+
+    <div class="term" role="group" aria-label="History, restart and the daemon service">
+      <div class="term-head"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span><span class="tname">zsh</span></div>
+      <div class="term-body"><span class="ln"><span class="p">$</span> dpty history work</span><span class="ln out">… typed commands and events for this session …</span><span class="ln"><span class="p">$</span> dpty restart work</span><span class="ln out">work restarted (same id, scrollback kept)</span><span class="ln"><span class="p">$</span> dpty install</span><span class="ln out">installed launchd service — restarts dpty if it exits</span><span class="ln"><span class="p">$</span> dpty mcp</span><span class="ln out">serving MCP over stdio …</span></div>
+    </div>
+  </div>
+</section>
+
+<section id="agents" class="wrap">
+  <p class="kicker">Agent sessions</p>
+  <h2 class="h2">claude and codex resume where they left off</h2>
+  <p class="lede">dpty treats agent CLIs as a special case: it keeps the session id and resumes the agent with that id instead of just replaying a shell.</p>
+
+  <div class="stack">
+    <div class="block">
+      <h3>Finding the session id</h3>
+      <p><code class="inline">claude</code> is launched with <code class="inline">--session-id &lt;uuid&gt;</code>, so dpty knows the id from the moment the session starts. <code class="inline">codex</code> does not take an id up front, so dpty finds it by scanning <code class="inline">~/.codex/sessions</code> after launch.</p>
+      <p>Other agents can be supported by passing <code class="inline">--kind</code> and <code class="inline">--resume-cmd "grok --resume {id}"</code>, or by having the agent report its own id with a hook: <code class="inline">dpty tag-agent "$DPTY_SESSION" &lt;id&gt;</code>.</p>
+    </div>
+    <div class="block">
+      <h3>Resuming after a crash</h3>
+      <p>On recovery dpty relaunches with the same cwd and environment and runs <code class="inline">claude --resume &lt;id&gt;</code> or <code class="inline">codex resume &lt;id&gt;</code>. The original prompt is dropped — the agent already has it in its own session — and every other flag you launched with is kept.</p>
+    </div>
+  </div>
+</section>
+
+<section id="surfaces" class="wrap">
+  <p class="kicker">Integration points</p>
+  <h2 class="h2">Three ways in: socket, HTTP, MCP</h2>
+  <p class="lede">The CLI, the HTTP API and the MCP server all call the same underlying RPC methods, so nothing behaves differently depending on how you connect.</p>
+
+  <div class="stack">
+    <div class="block">
+      <h3>Unix socket</h3>
+      <p><code class="inline">~/.durable-pty/dpty.sock</code> (mode 0600): JSON-line RPC, with an <code class="inline">attach</code> call that upgrades the connection to binary terminal frames.</p>
+    </div>
+    <div class="block">
+      <h3>HTTP and WebSocket</h3>
+      <p>Default <code class="inline">127.0.0.1:7878</code>, bearer token from <code class="inline">dpty token</code> (disable with <code class="inline">--no-http</code>): <code class="inline">POST /rpc</code>, <code class="inline">GET /ws</code> for live attach, <code class="inline">GET /health</code>.</p>
+    </div>
+    <div class="block">
+      <h3>MCP</h3>
+      <p>Stdio, streamable HTTP at <code class="inline">POST /mcp</code>, and legacy SSE at <code class="inline">GET /sse</code> + <code class="inline">POST /messages</code>. Tools exposed:</p>
+      <ul class="plain">
+        <li><code>pty_list</code> list every session and its state</li>
+        <li><code>pty_new</code> start a new session</li>
+        <li><code>pty_send</code> type into a session</li>
+        <li><code>pty_screen</code> read the current screen</li>
+        <li><code>pty_logs</code> read raw output</li>
+        <li><code>pty_wait</code> block until a pattern appears</li>
+        <li><code>pty_history</code> read typed commands and events</li>
+        <li><code>pty_restart</code> restart a session</li>
+        <li><code>pty_kill</code> stop a session</li>
+      </ul>
+      <p style="margin-top:14px;">Point an MCP client at it with:</p>
+      <div class="snippet">{<br>&nbsp;&nbsp;<span class="k">"mcpServers"</span>: {<br>&nbsp;&nbsp;&nbsp;&nbsp;<span class="k">"dpty"</span>: {<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="k">"command"</span>: <span class="s">"dpty"</span>,<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="k">"args"</span>: [<span class="s">"mcp"</span>]<br>&nbsp;&nbsp;&nbsp;&nbsp;}<br>&nbsp;&nbsp;}<br>}</div>
+    </div>
+  </div>
+</section>
+
+<section id="architecture" class="wrap">
+  <p class="kicker">Design</p>
+  <h2 class="h2">Architecture</h2>
+  <p class="lede">Clients never hold the terminal — the daemon does, and it is the only thing that writes to SQLite. A per-session shim keeps a running process alive even while the daemon is restarted.</p>
+
+  <div class="diagram-wrap">
+    <svg viewBox="0 0 760 320" role="img" aria-labelledby="arch-title arch-desc">
+      <title id="arch-title">dpty architecture</title>
+      <desc id="arch-desc">Your app, the CLI and MCP clients all talk to the dpty daemon, which stores everything in SQLite and talks to a per-session shim process that in turn owns the PTY and the running process.</desc>
+      <defs>
+        <marker id="arrowhead" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+          <path d="M0,0 L6,3 L0,6 Z" fill="currentColor" style="color:var(--ink-faint)"></path>
+        </marker>
+      </defs>
+
+      <rect class="dg-box" x="20" y="20" width="140" height="40" rx="6"></rect>
+      <text class="dg-text" x="90" y="44" text-anchor="middle">Your app</text>
+
+      <rect class="dg-box" x="20" y="80" width="140" height="40" rx="6"></rect>
+      <text class="dg-text" x="90" y="104" text-anchor="middle">dpty CLI</text>
+
+      <rect class="dg-box" x="20" y="140" width="140" height="40" rx="6"></rect>
+      <text class="dg-text" x="90" y="164" text-anchor="middle">MCP clients</text>
+
+      <path class="dg-arrow" d="M160,40 C230,40 230,130 300,130"></path>
+      <path class="dg-arrow" d="M160,100 C230,100 230,130 300,130"></path>
+      <path class="dg-arrow" d="M160,160 C230,160 230,130 300,130"></path>
+
+      <rect class="dg-box accent" x="300" y="100" width="170" height="60" rx="8"></rect>
+      <text class="dg-text" x="385" y="124" text-anchor="middle" font-weight="600">dpty daemon</text>
+      <text class="dg-text dim" x="385" y="142" text-anchor="middle">socket · HTTP · MCP</text>
+
+      <path class="dg-arrow dg-pulse" d="M385,160 C385,200 300,200 300,230"></path>
+      <rect class="dg-box" x="200" y="230" width="140" height="44" rx="6"></rect>
+      <text class="dg-text" x="270" y="257" text-anchor="middle">SQLite</text>
+
+      <path class="dg-arrow dg-pulse" d="M470,130 C540,130 540,130 600,130"></path>
+      <rect class="dg-box accent" x="600" y="100" width="140" height="60" rx="8"></rect>
+      <text class="dg-text" x="670" y="124" text-anchor="middle" font-weight="600">Per-session shim</text>
+      <text class="dg-text dim" x="670" y="142" text-anchor="middle">outlives the daemon</text>
+
+      <path class="dg-arrow" d="M670,160 C670,200 670,200 670,230"></path>
+      <rect class="dg-box" x="580" y="230" width="180" height="44" rx="6"></rect>
+      <text class="dg-text" x="670" y="257" text-anchor="middle">PTY + running process</text>
+    </svg>
+  </div>
+
+  <p class="hero-note" style="margin-top:16px;">The shim keeps the real process running while the daemon is replaced or restarted, and the daemon re-attaches to it afterward and catches up on whatever output it missed. <code class="inline">dpty stop</code> leaves every session's shim running; <code class="inline">dpty stop --sessions</code> stops them too. More detail: <a href="how-it-works.html">how it works →</a>.</p>
+</section>
+
+<section id="limits" class="wrap">
+  <p class="kicker">Scope</p>
+  <h2 class="h2">What dpty is not</h2>
+  <p class="lede">Said plainly, so you do not find out the hard way.</p>
+
+  <div class="limits-grid">
+    <div class="limit-card no">
+      <h3>Not for Windows</h3>
+      <p>macOS and Linux only. There is no Windows support today.</p>
+    </div>
+    <div class="limit-card no">
+      <h3>A reboot ends running processes</h3>
+      <p>There is no way around this — the OS kills them. What dpty guarantees is that the session, its scrollback and its history survive and are restored on the next daemon start.</p>
+    </div>
+    <div class="limit-card ok">
+      <h3>History and resume remain</h3>
+      <p>Scrollback, typed commands and events are in SQLite before anything crashes, so you never lose the record even if the process itself is gone.</p>
+    </div>
+    <div class="limit-card ok">
+      <h3>Agent resume is best-effort</h3>
+      <p>claude and codex are resumed by session id with the original prompt dropped. Other agents need <code class="inline">--resume-cmd</code> or a reporting hook to work the same way.</p>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer class="wrap">
+  <div class="footer-links">
+    <a href="https://github.com/jasonkneen/durable-pty">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.46-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.9 1.52 2.36 1.08 2.94.83.09-.65.35-1.08.63-1.33-2.22-.25-4.56-1.11-4.56-4.95 0-1.09.39-1.99 1.03-2.69-.1-.26-.45-1.3.1-2.7 0 0 .84-.27 2.75 1.02a9.6 9.6 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.4.2 2.44.1 2.7.64.7 1.03 1.6 1.03 2.69 0 3.85-2.35 4.7-4.58 4.95.36.31.68.92.68 1.85v2.75c0 .26.18.57.69.48A10 10 0 0 0 12 2Z" fill="currentColor" stroke="none"/></svg>
+      GitHub repo
+    </a>
+    <a href="https://github.com/jasonkneen/durable-pty/blob/main/README.md">README</a>
+    <a href="https://github.com/jasonkneen/durable-pty/blob/main/LICENSE">LICENSE (MIT)</a>
+    <a href="https://github.com/jasonkneen/durable-pty/blob/main/CONTRIBUTING.md">Contributing</a>
+  </div>
+  <p class="footer-fine">durable-pty is MIT licensed. Written by Jason Kneen.</p>
+</footer>
+</main>
+
+<script>
+(function () {
+  "use strict";
+  document.querySelectorAll(".install-cmd").forEach(function (box) {
+    var btn = box.querySelector(".copy-btn");
+    var label = box.querySelector(".copy-label");
+    var text = box.getAttribute("data-copy-text") || box.querySelector(".cmd-text").textContent;
+    var resetTimer = null;
+
+    function showCopied() {
+      btn.setAttribute("data-copied", "true");
+      label.textContent = "Copied";
+      if (resetTimer) { clearTimeout(resetTimer); }
+      resetTimer = setTimeout(function () {
+        btn.removeAttribute("data-copied");
+        label.textContent = "Copy";
+      }, 2000);
+    }
+
+    function fallbackCopy(value) {
+      var ta = document.createElement("textarea");
+      ta.value = value;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.top = "-1000px";
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand("copy"); } catch (e) { /* no-op */ }
+      document.body.removeChild(ta);
+    }
+
+    btn.addEventListener("click", function () {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(showCopied, function () {
+          fallbackCopy(text);
+          showCopied();
+        });
+      } else {
+        fallbackCopy(text);
+        showCopied();
+      }
+    });
+  });
+})();
+</script>
+</body>
+</html>

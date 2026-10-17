@@ -25,7 +25,8 @@ cargo run -- serve --no-http
 
 | File | What it does |
 |---|---|
-| `src/session.rs` | Session manager: spawning, output, restart policy, recovery on boot |
+| `src/session.rs` | Session manager: output, restart policy, reattaching to shims on boot |
+| `src/shim.rs` | The per-session helper process that owns the terminal and the program |
 | `src/db.rs` | SQLite storage (sessions, output, typed commands, events) |
 | `src/agents.rs` | Agent adapters: choosing and finding session ids, building the resume command |
 | `src/rpc.rs` | The one RPC surface the socket, HTTP and MCP all share |

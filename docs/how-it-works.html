@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How it works — durable-pty</title>
+<meta name="description" content="The daemon, per-session shims, SQLite storage, recovery behaviour and honest limits of dpty.">
+<meta name="theme-color" content="#0b0d10">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f6f5f2; --bg-raised: #ffffff; --ink: #14161a; --ink-dim: #4b5058; --ink-faint: #767c86;
+    --line: #dcd9d2; --line-strong: #b9b4aa; --accent: #0a5c36; --accent-ink: #ffffff;
+    --term-bg: #121414; --term-ink: #e7e9e4; --term-dim: #8a9088; --term-accent: #6bc78f; --term-border: #262a28;
+    --ok: #0a5c36; --bad: #8a1f1f; --radius: 10px;
+    --mono: "SFMono-Regular", "JetBrains Mono", ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    --head: "Space Grotesk", var(--sans);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b0d10; --bg-raised: #141719; --ink: #eef0ee; --ink-dim: #a9afb3; --ink-faint: #767e84;
+      --line: #262a2e; --line-strong: #363b40; --accent: #5fd392; --accent-ink: #0a140f;
+      --term-bg: #0a0b0a; --term-ink: #e7e9e4; --term-dim: #70766f; --term-accent: #5fd392; --term-border: #1c1f1d;
+      --ok: #5fd392; --bad: #e16767;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); line-height: 1.55; overflow-x: hidden; }
+  a { color: var(--accent); text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
+  a:hover { text-decoration-color: currentColor; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+  h1, h2, h3 { font-family: var(--head); font-weight: 600; letter-spacing: -0.01em; color: var(--ink); margin: 0 0 12px; }
+  code.inline { font-family: var(--mono); font-size: 0.88em; background: var(--bg-raised); border: 1px solid var(--line); border-radius: 4px; padding: 0.08em 0.4em; }
+
+  .topbar { display: flex; align-items: center; justify-content: space-between; padding: 20px 16px; max-width: 1080px; margin: 0 auto; gap: 12px; flex-wrap: wrap; }
+  @media (min-width: 640px) { .topbar { padding: 20px 32px; } }
+  .logo { display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); font-weight: 600; font-size: 1rem; }
+  .logo .dot { color: var(--accent); }
+  .topnav { display: flex; gap: 16px; font-size: 0.88rem; flex-wrap: wrap; }
+  .topnav a { color: var(--ink-dim); white-space: nowrap; }
+  .topnav a[aria-current="page"] { color: var(--ink); font-weight: 600; }
+
+  .doc-wrap { max-width: 1080px; margin: 0 auto; padding: 0 16px 72px; }
+  @media (min-width: 640px) { .doc-wrap { padding: 0 32px 80px; } }
+  .doc-head { padding: 12px 0 32px; border-bottom: 1px solid var(--line); margin-bottom: 32px; }
+  .doc-head p { color: var(--ink-dim); max-width: 60ch; margin: 10px 0 0; }
+  .kicker { font-family: var(--mono); font-size: 0.78rem; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.08em; margin: 0 0 8px; }
+
+  .doc-page { display: flex; gap: 48px; align-items: flex-start; }
+  .doc-side { flex: 0 0 190px; position: sticky; top: 24px; }
+  .doc-side nav ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; font-size: 0.86rem; }
+  .doc-side a { color: var(--ink-dim); }
+  .doc-side a:hover { color: var(--ink); }
+  .doc-main { flex: 1 1 auto; min-width: 0; }
+  .doc-toc { display: none; margin-bottom: 28px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-raised); }
+  .doc-toc summary { padding: 12px 16px; cursor: pointer; font-family: var(--mono); font-size: 0.85rem; list-style: none; }
+  .doc-toc summary::-webkit-details-marker { display: none; }
+  .doc-toc ul { list-style: none; margin: 0; padding: 0 16px 16px; display: flex; flex-direction: column; gap: 8px; font-size: 0.9rem; }
+  @media (max-width: 860px) { .doc-side { display: none; } .doc-toc { display: block; } }
+
+  section.doc { padding: 0 0 40px; }
+  section.doc h2 { font-size: 1.3rem; margin-bottom: 10px; scroll-margin-top: 20px; }
+  section.doc p { color: var(--ink-dim); max-width: 66ch; margin: 0 0 14px; }
+  section.doc + section.doc { border-top: 1px solid var(--line); padding-top: 36px; }
+
+  .diagram-wrap { background: var(--bg-raised); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; overflow-x: auto; margin: 0 0 14px; }
+  .diagram-wrap svg { display: block; margin: 0 auto; min-width: 560px; }
+  .dg-box { fill: var(--bg-raised); stroke: var(--line-strong); stroke-width: 1.2; }
+  .dg-box.accent { stroke: var(--accent); }
+  .dg-text { font-family: var(--mono); font-size: 12px; fill: var(--ink); }
+  .dg-text.dim { fill: var(--ink-faint); font-size: 11px; }
+  .dg-arrow { stroke: var(--ink-faint); stroke-width: 1.2; fill: none; marker-end: url(#arrowhead2); }
+  @media (prefers-reduced-motion: no-preference) {
+    .dg-pulse { animation: dgpulse 2.4s ease-in-out infinite; }
+    @keyframes dgpulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+  }
+
+  .crash-table { width: 100%; border-collapse: collapse; font-size: 0.92rem; display: block; overflow-x: auto; margin: 0 0 16px; }
+  .crash-table table { width: 100%; border-collapse: collapse; }
+  .crash-table th, .crash-table td { text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  .crash-table th { font-family: var(--mono); font-size: 0.74rem; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.05em; }
+  .crash-table td:first-child { font-weight: 600; white-space: nowrap; width: 1%; }
+  .crash-table tr:last-child td { border-bottom: none; }
+
+  .limits-grid { display: grid; grid-template-columns: 1fr; gap: 14px; margin: 0 0 10px; }
+  @media (min-width: 640px) { .limits-grid { grid-template-columns: 1fr 1fr; } }
+  .limit-card { border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; background: var(--bg-raised); }
+  .limit-card.no { border-left: 3px solid var(--bad); }
+  .limit-card.ok { border-left: 3px solid var(--ok); }
+  .limit-card h3 { font-size: 0.95rem; margin-bottom: 6px; }
+  .limit-card p { margin: 0; color: var(--ink-dim); font-size: 0.92rem; }
+
+  footer { border-top: 1px solid var(--line); padding: 40px 0 56px; max-width: 1080px; margin: 0 auto; }
+  .footer-links { display: flex; flex-wrap: wrap; gap: 16px 22px; font-size: 0.9rem; padding: 0 16px; }
+  @media (min-width: 640px) { .footer-links { padding: 0 32px; } }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <a class="logo" href="index.html">dpty<span class="dot">.</span></a>
+  <nav class="topnav" aria-label="Site">
+    <a href="index.html">Home</a>
+    <a href="getting-started.html">Getting started</a>
+    <a href="cli.html">CLI</a>
+    <a href="agents.html">Agents</a>
+    <a href="mcp-and-api.html">MCP &amp; API</a>
+    <a href="how-it-works.html" aria-current="page">How it works</a>
+  </nav>
+</div>
+
+<main class="doc-wrap">
+  <div class="doc-head">
+    <p class="kicker">Design</p>
+    <h1>How it works</h1>
+    <p>The daemon, the per-session shim, SQLite, and what survives each kind of failure.</p>
+  </div>
+
+  <details class="doc-toc">
+    <summary>In this guide</summary>
+    <ul>
+      <li><a href="#daemon">The daemon</a></li>
+      <li><a href="#shims">Per-session shims</a></li>
+      <li><a href="#sqlite">SQLite</a></li>
+      <li><a href="#recovery">Recovery</a></li>
+      <li><a href="#limits">Limits</a></li>
+    </ul>
+  </details>
+
+  <div class="doc-page">
+    <aside class="doc-side">
+      <nav aria-label="Sections">
+        <ul>
+          <li><a href="#daemon">The daemon</a></li>
+          <li><a href="#shims">Shims</a></li>
+          <li><a href="#sqlite">SQLite</a></li>
+          <li><a href="#recovery">Recovery</a></li>
+          <li><a href="#limits">Limits</a></li>
+        </ul>
+      </nav>
+    </aside>
+
+    <div class="doc-main">
+      <section class="doc" id="daemon">
+        <h2>The daemon</h2>
+        <p>One daemon process per machine owns every session. Your app, the CLI, and MCP clients all talk to it over the unix socket, HTTP/WebSocket, or MCP — never directly to a terminal. That is what lets your app crash without taking a session down: the session was never inside your app's process.</p>
+      </section>
+
+      <section class="doc" id="shims">
+        <h2>Per-session shims</h2>
+        <p>Each session has its own small helper process — the shim — that owns the PTY master and the child process underneath it. The daemon connects to the shim over a local socket, says how far into its output it has already read, and gets everything since, then live output as it happens.</p>
+        <div class="diagram-wrap">
+          <svg viewBox="0 0 760 240" role="img" aria-labelledby="arch2-title arch2-desc">
+            <title id="arch2-title">Daemon and shim relationship</title>
+            <desc id="arch2-desc">The daemon talks to a per-session shim, which owns the PTY and the running process and keeps running even if the daemon restarts.</desc>
+            <defs>
+              <marker id="arrowhead2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+                <path d="M0,0 L6,3 L0,6 Z" fill="currentColor" style="color:var(--ink-faint)"></path>
+              </marker>
+            </defs>
+            <rect class="dg-box accent" x="30" y="90" width="170" height="60" rx="8"></rect>
+            <text class="dg-text" x="115" y="114" text-anchor="middle" font-weight="600">dpty daemon</text>
+            <text class="dg-text dim" x="115" y="132" text-anchor="middle">can restart freely</text>
+
+            <path class="dg-arrow dg-pulse" d="M200,120 C280,120 280,120 360,120"></path>
+            <text class="dg-text dim" x="280" y="108" text-anchor="middle">local socket</text>
+
+            <rect class="dg-box accent" x="360" y="90" width="170" height="60" rx="8"></rect>
+            <text class="dg-text" x="445" y="114" text-anchor="middle" font-weight="600">per-session shim</text>
+            <text class="dg-text dim" x="445" y="132" text-anchor="middle">outlives the daemon</text>
+
+            <path class="dg-arrow" d="M445,150 C445,180 445,180 445,200"></path>
+            <rect class="dg-box" x="345" y="200" width="200" height="30" rx="6"></rect>
+            <text class="dg-text" x="445" y="220" text-anchor="middle">PTY master + child process</text>
+
+            <path class="dg-arrow" d="M115,150 C115,180 115,180 115,200"></path>
+            <rect class="dg-box" x="30" y="200" width="170" height="30" rx="6"></rect>
+            <text class="dg-text" x="115" y="220" text-anchor="middle">SQLite</text>
+          </svg>
+        </div>
+        <p>When the daemon restarts, it reconnects to the still-running shim, catches up on whatever output it missed while it was down, and the session itself never stopped. <code class="inline">dpty stop</code> leaves every session's shim running by default; <code class="inline">dpty stop --sessions</code> stops them too.</p>
+      </section>
+
+      <section class="doc" id="sqlite">
+        <h2>SQLite</h2>
+        <p>Everything durable — sessions, scrollback, typed commands, events — is written to SQLite in <code class="inline">~/.durable-pty/dpty.db</code> (override with <code class="inline">DPTY_HOME</code>). Up to 16 MB of output is kept per session. Typed commands are not recorded while a session's terminal has echo off (password prompts) or a full-screen app is in control. Session environment — PATH, HOME, locale, agent API variables, plus anything passed with <code class="inline">-e</code> — is stored too, so recovery can relaunch with the same environment; <code class="inline">--env-all</code> stores everything instead of the defaults.</p>
+      </section>
+
+      <section class="doc" id="recovery">
+        <h2>Recovery</h2>
+        <div class="crash-table" role="table" aria-label="Recovery behaviour">
+          <table>
+            <thead><tr><th scope="col">Event</th><th scope="col">What happens</th></tr></thead>
+            <tbody>
+              <tr><td>Your app / browser crashes</td><td>Nothing happens to the session. Reattach by id, name or label; you get the current screen, then live output.</td></tr>
+              <tr><td>Daemon crashes or restarts</td><td>If a session's shim is still running, the daemon reattaches and catches up on missed output — nothing lost. If the shim is also gone, the session is marked <code class="inline">lost</code>, then relaunched per its restart policy, same id, history kept.</td></tr>
+              <tr><td>Machine reboots or you log out</td><td>Every process dies, shims included — nothing can prevent that. Sessions and their history survive in SQLite and are restored the next time the daemon starts.</td></tr>
+              <tr><td>A session crash-loops</td><td>Capped at 5 automatic restarts per 60 seconds, then dpty gives up and records it as <code class="inline">restart-loop</code>.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="doc" id="limits">
+        <h2>Limits</h2>
+        <div class="limits-grid">
+          <div class="limit-card no">
+            <h3>Not for Windows</h3>
+            <p>macOS and Linux only.</p>
+          </div>
+          <div class="limit-card no">
+            <h3>A reboot still ends running processes</h3>
+            <p>The shim survives a daemon restart, not a machine reboot or logout. The OS kills everything then.</p>
+          </div>
+          <div class="limit-card ok">
+            <h3>History and resume remain</h3>
+            <p>Scrollback, typed commands and events are in SQLite before anything crashes, so the record survives even when the process does not.</p>
+          </div>
+          <div class="limit-card ok">
+            <h3>Agent resume is best-effort</h3>
+            <p>claude and codex are resumed by session id with the original prompt dropped. Other agents need <code class="inline">--resume-cmd</code> or the <code class="inline">tag-agent</code> hook.</p>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <div class="footer-links">
+    <a href="https://github.com/jasonkneen/durable-pty">GitHub repo</a>
+    <a href="https://github.com/jasonkneen/durable-pty/blob/main/README.md">README</a>
+    <a href="https://github.com/jasonkneen/durable-pty/blob/main/LICENSE">LICENSE (MIT)</a>
+    <a href="https://github.com/jasonkneen/durable-pty/blob/main/CONTRIBUTING.md">Contributing</a>
+  </div>
+</footer>
+</body>
+</html>

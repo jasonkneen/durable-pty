@@ -33,6 +33,10 @@ const CLAUDE_VALUE_FLAGS: &[&str] = &[
     "--mcp-config", "--append-system-prompt", "--system-prompt", "--settings", "--agent", "--max-turns", "--output-format",
     "--input-format", "--fallback-model", "--plugin-dir", "--effort", "--session-id", "--resume", "-r", "--name", "-n",
 ];
+const GROK_VALUE_FLAGS: &[&str] = &[
+    "-m", "--model", "--agent", "--agents", "--allow", "--deny", "--cwd", "--permission-mode", "--rules", "--reasoning-effort",
+    "--max-turns", "-s", "--session-id", "-r", "--resume", "--debug-file", "--output-format",
+];
 const CODEX_VALUE_FLAGS: &[&str] = &["-m", "--model", "-c", "--config", "-C", "--cd", "-s", "--sandbox", "-a", "--ask-for-approval", "-p", "--profile", "-i", "--image"];
 
 /// Drops the initial prompt (a positional first or last argument) so a resume does not resend it.
@@ -56,12 +60,16 @@ pub fn prepare(row: &mut SessionRow) {
         return;
     }
     match row.kind.as_str() {
-        "claude" => {
+        "claude" | "grok" => {
+            let grok = row.kind == "grok";
             let a = &row.args;
-            let mut it = a.iter().enumerate();
-            while let Some((i, x)) = it.next() {
+            for (i, x) in a.iter().enumerate() {
                 match x.as_str() {
                     "--session-id" => {
+                        row.agent_session_id = a.get(i + 1).cloned();
+                        return;
+                    }
+                    "-s" if grok => {
                         row.agent_session_id = a.get(i + 1).cloned();
                         return;
                     }
@@ -87,6 +95,39 @@ pub fn prepare(row: &mut SessionRow) {
     }
 }
 
+/// A resume that fails straight away (the agent has no such conversation) must not loop: drop the resume arguments and
+/// start a fresh conversation instead. Returns whether anything was dropped.
+pub fn forget_resume(row: &mut SessionRow) -> bool {
+    let had = row.agent_session_id.is_some();
+    match row.kind.as_str() {
+        "claude" | "grok" => {
+            let mut rest = vec![];
+            let mut i = 0;
+            while i < row.args.len() {
+                if matches!(row.args[i].as_str(), "--resume" | "-r") {
+                    i += 1;
+                } else {
+                    rest.push(row.args[i].clone());
+                }
+                i += 1;
+            }
+            row.args = rest;
+        }
+        "codex" => {
+            if row.args.first().map(String::as_str) == Some("resume") {
+                row.args.remove(0);
+                if row.args.first().is_some_and(|v| looks_like_id(v)) {
+                    row.args.remove(0);
+                }
+            }
+        }
+        _ => {}
+    }
+    row.agent_session_id = None;
+    prepare(row);
+    had
+}
+
 /// Rewrites cmd/args so the next launch continues the previous agent conversation. Returns whether it did.
 pub fn resume(row: &mut SessionRow) -> bool {
     let Some(id) = row.agent_session_id.clone() else { return false };
@@ -101,12 +142,14 @@ pub fn resume(row: &mut SessionRow) -> bool {
         return true;
     }
     match row.kind.as_str() {
-        "claude" => {
+        "claude" | "grok" => {
+            let grok = row.kind == "grok";
             let mut rest = vec![];
             let mut i = 0;
             while i < row.args.len() {
                 match row.args[i].as_str() {
                     "--session-id" => i += 1,
+                    "-s" if grok => i += 1,
                     "--resume" | "-r" => {
                         if row.args.get(i + 1).is_some_and(|v| !v.starts_with('-')) {
                             i += 1;
@@ -118,7 +161,7 @@ pub fn resume(row: &mut SessionRow) -> bool {
                 i += 1;
             }
             let mut args = vec!["--resume".to_string(), id];
-            args.extend(drop_prompt(rest, CLAUDE_VALUE_FLAGS));
+            args.extend(drop_prompt(rest, if grok { GROK_VALUE_FLAGS } else { CLAUDE_VALUE_FLAGS }));
             row.args = args;
             true
         }
@@ -280,6 +323,34 @@ mod tests {
         assert_eq!(r.args, ["--resume", id.as_str(), "--dangerously-skip-permissions", "--model", "opus"]);
         assert!(resume(&mut r));
         assert_eq!(r.args.iter().filter(|a| *a == "--resume").count(), 1);
+    }
+
+    #[test]
+    fn failed_resume_falls_back_to_a_fresh_conversation() {
+        let mut r = row("claude", &["--model", "haiku"]);
+        prepare(&mut r);
+        let first = r.agent_session_id.clone().unwrap();
+        assert!(resume(&mut r));
+        assert!(r.args.contains(&"--resume".to_string()));
+        assert!(forget_resume(&mut r));
+        assert!(!r.args.contains(&"--resume".to_string()));
+        let second = r.agent_session_id.clone().unwrap();
+        assert_ne!(first, second, "a new conversation gets a new id");
+        assert_eq!(&r.args[..2], ["--session-id".to_string(), second]);
+        assert!(r.args.contains(&"haiku".to_string()), "other flags are kept");
+    }
+
+    #[test]
+    fn grok_gets_a_session_id_and_resumes() {
+        let mut r = row("grok", &["--model", "grok-x", "fix it"]);
+        prepare(&mut r);
+        let id = r.agent_session_id.clone().unwrap();
+        assert_eq!(&r.args[..2], ["--session-id".to_string(), id.clone()]);
+        assert!(resume(&mut r));
+        assert_eq!(r.args, ["--resume", id.as_str(), "--model", "grok-x"]);
+        let mut s = row("grok", &["-s", "abc12345-0000-0000-0000-000000000000"]);
+        prepare(&mut s);
+        assert_eq!(s.agent_session_id.as_deref(), Some("abc12345-0000-0000-0000-000000000000"));
     }
 
     #[test]

@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   env TEXT NOT NULL, labels TEXT NOT NULL, kind TEXT NOT NULL, agent_session_id TEXT, resume_cmd TEXT,
   restart TEXT NOT NULL, status TEXT NOT NULL, exit_code INTEGER, pid INTEGER, cols INTEGER NOT NULL,
   rows INTEGER NOT NULL, created_ms INTEGER NOT NULL, started_ms INTEGER NOT NULL, ended_ms INTEGER,
-  last_active_ms INTEGER NOT NULL, restarts INTEGER NOT NULL DEFAULT 0, last_screen BLOB, live_cwd TEXT
+  last_active_ms INTEGER NOT NULL, restarts INTEGER NOT NULL DEFAULT 0, last_screen BLOB, live_cwd TEXT,
+  shim_consumed INTEGER NOT NULL DEFAULT 0, screen_offset INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS output (
   session_id TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL, data BLOB NOT NULL,
@@ -73,6 +74,10 @@ impl Db {
         if !has {
             c.execute_batch("ALTER TABLE sessions ADD COLUMN live_cwd TEXT")?;
         }
+        let has_offsets: bool = c.prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name='shim_consumed'")?.exists([])?;
+        if !has_offsets {
+            c.execute_batch("ALTER TABLE sessions ADD COLUMN shim_consumed INTEGER NOT NULL DEFAULT 0; ALTER TABLE sessions ADD COLUMN screen_offset INTEGER NOT NULL DEFAULT 0;")?;
+        }
         Ok(Db { conn: Mutex::new(c) })
     }
 
@@ -114,8 +119,24 @@ impl Db {
         Ok(())
     }
 
-    pub fn set_screen(&self, id: &str, screen: &[u8]) -> Result<()> {
-        self.c().execute("UPDATE sessions SET last_screen=?2 WHERE id=?1", params![id, screen])?;
+    /// Stores the screen snapshot together with how far into the shim's output it reflects.
+    pub fn set_screen(&self, id: &str, screen: &[u8], offset: u64) -> Result<()> {
+        self.c().execute("UPDATE sessions SET last_screen=?2, screen_offset=?3 WHERE id=?1", params![id, screen, offset as i64])?;
+        Ok(())
+    }
+
+    /// (output already stored, output the saved screen reflects), both as offsets into the shim's output stream.
+    pub fn offsets(&self, id: &str) -> Result<(u64, u64)> {
+        Ok(self
+            .c()
+            .query_row("SELECT shim_consumed, screen_offset FROM sessions WHERE id=?1", [id], |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)))
+            .optional()?
+            .unwrap_or((0, 0)))
+    }
+
+    /// A new shim starts its output stream at zero.
+    pub fn reset_offsets(&self, id: &str) -> Result<()> {
+        self.c().execute("UPDATE sessions SET shim_consumed=0, screen_offset=0 WHERE id=?1", [id])?;
         Ok(())
     }
 
@@ -128,13 +149,23 @@ impl Db {
             .unwrap_or_default())
     }
 
-    pub fn append_output(&self, batch: &[(String, i64, i64, Vec<u8>)]) -> Result<()> {
+    pub fn append_output(&self, batch: &[(String, i64, i64, Vec<u8>, Option<u64>)]) -> Result<()> {
         let mut c = self.c();
         let tx = c.transaction()?;
         {
             let mut st = tx.prepare_cached("INSERT OR REPLACE INTO output (session_id,seq,ts,data) VALUES (?1,?2,?3,?4)")?;
-            for (id, seq, ts, data) in batch {
+            let mut ends: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+            for (id, seq, ts, data, end) in batch {
                 st.execute(params![id, seq, ts, data])?;
+                if let Some(e) = end {
+                    let slot = ends.entry(id.as_str()).or_insert(0);
+                    *slot = (*slot).max(*e);
+                }
+            }
+            // Stored together with the output, so after a crash the two always agree.
+            let mut up = tx.prepare_cached("UPDATE sessions SET shim_consumed=MAX(shim_consumed, ?2) WHERE id=?1")?;
+            for (id, end) in ends {
+                up.execute(params![id, end as i64])?;
             }
         }
         tx.commit()?;

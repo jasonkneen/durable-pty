@@ -1,8 +1,8 @@
 # durable-pty (`dpty`)
 
-One binary that is a **PTY session daemon**, a **CLI**, and an **MCP server**. Sessions live in the daemon, not in your app,
-so an app crash never takes a terminal with it. Everything — sessions, scrollback, typed commands, events — is stored in SQLite,
-and agent sessions (claude, codex, …) are **resumed** after the daemon dies.
+One binary that is a **PTY session daemon**, a **CLI**, and an **MCP server**. Every session runs in its own small helper process, so
+neither an app crash nor a daemon restart takes a terminal with it. Everything (sessions, scrollback, typed commands, events)
+is stored in SQLite, and agent sessions (claude, codex) are **resumed** after a reboot.
 
 ```
 dpty new -n work -C ~/proj -- claude "fix the bug"   # starts the daemon if needed, attaches (Ctrl-\ detaches)
@@ -10,23 +10,26 @@ dpty ls                                              # all sessions, running / e
 dpty attach work        dpty screen work        dpty logs work        dpty history work
 dpty send work "npm test"        dpty send work -k ctrl-c        dpty wait work "passed" --timeout 60
 dpty restart work       dpty kill work -s TERM  dpty rm work    dpty events
+dpty stop               # stop the daemon; sessions keep running (dpty stop --sessions ends them)
 dpty install            # run at login, restart on exit (launchd / systemd --user)
 dpty mcp                # MCP over stdio;  dpty mcp --http 127.0.0.1:7979  for streamable HTTP + SSE
 ```
 
 ## How durability works
 
+Each session has a **shim**: a tiny process that owns the terminal and the program running in it. The daemon connects to it, and
+when the daemon goes away the shim just keeps running, buffering output. The next daemon reconnects, replays what it missed (up
+to 8 MB, in order, with no repeats) and carries on. `dpty stop` leaves sessions running; `dpty stop --sessions` ends them too.
+
 | Event | What happens |
 |---|---|
-| Your app / browser crashes | Nothing. Reattach by id, name or label. You get the current screen, then live output. |
-| Daemon crashes or restarts | On start, anything recorded as running is marked `lost`, then relaunched in the same cwd/env if its `restart` policy allows (default for agents: `on-failure`). Same session id, history kept. |
-| Agent sessions | claude gets `--session-id <uuid>` at launch (so the id is known immediately); codex ids are found by scanning `~/.codex/sessions`. On recovery: `claude --resume <id>`, `codex resume <id>`, original prompt dropped, other flags kept. Other agents: `--kind`/`--resume-cmd "grok --resume {id}"`. A hook can report ids: `dpty tag-agent "$DPTY_SESSION" <id>`. |
-| Shells | `dpty` tracks each shell's live directory, so a restored shell starts where it was, with its scrollback replayed. |
-| Reboot / logout | Processes die; sessions and history survive and are restored on next daemon start. |
-| Crash loop | Max 5 automatic restarts per 60s, then it gives up and records `restart-loop`. |
+| Your app / browser crashes | Nothing. Reattach by id, name or label: you get the current screen, then live output. |
+| Daemon crashes, restarts or is upgraded | The programs keep running with the same pids. The new daemon reattaches and catches up. |
+| Reboot / logout (the programs are gone) | Sessions and history survive. On the next start, agent sessions are relaunched with their resume command and shells come back in the directory they were last in, with scrollback replayed. |
+| Agent sessions | claude gets `--session-id <uuid>` at launch (so the id is known immediately); codex ids are found by scanning `~/.codex/sessions`. After a reboot: `claude --resume <id>`, `codex resume <id>`, original prompt dropped, other flags kept. If a resume fails straight away, a fresh conversation is started instead of looping. Other agents: `--kind` / `--resume-cmd "grok --resume {id}"`. A hook can report ids: `dpty tag-agent "$DPTY_SESSION" <id>`. |
+| Crash loop | At most 5 automatic restarts per 60 s, then it gives up and records `restart-loop`. |
 
-Not possible: keeping a *running process* alive when the daemon itself dies (the daemon owns the PTY master). A per-session
-shim process would fix that; the code is structured so it can be added.
+Not possible: keeping a program alive through a reboot or a killed shim. History, directory and agent resume are what survive.
 
 ## Surfaces
 
@@ -49,9 +52,22 @@ Session environment (PATH, HOME, locale, agent API variables, plus `-e` values) 
 ## Install
 
 ```
-cargo install --path .        # puts `dpty` on your PATH (~/.cargo/bin)
-dpty install                  # optional: start at login, restart if it exits
+brew install jasonkneen/tap/dpty                                            # Homebrew (macOS, Linux)
+curl -fsSL https://raw.githubusercontent.com/jasonkneen/durable-pty/main/install.sh | sh   # prebuilt binary, checksum verified
+cargo install --path .                                                      # from a checkout
 ```
+
+The curl installer puts `dpty` in `~/.local/bin` (`DPTY_INSTALL_DIR` changes it, `DPTY_VERSION=v0.1.0` pins a release) and refuses
+to install if the download's sha256 does not match. Then run `dpty install` to start the daemon at login (launchd on macOS,
+`systemd --user` on Linux). Uninstall: `dpty uninstall`, then remove the binary (`install.sh --uninstall`, `brew uninstall dpty`
+or `cargo uninstall durable-pty`). Your data stays in `~/.durable-pty` until you delete it.
+
+### Releasing (maintainers)
+
+Push a tag such as `v0.1.0`: `.github/workflows/release.yml` builds macOS (arm64, x86_64) and Linux (x86_64, aarch64) binaries and
+publishes them with `.sha256` files. Then run `scripts/update-formula.sh v0.1.0` and copy `packaging/homebrew/dpty.rb` to
+`Formula/dpty.rb` in your `homebrew-tap` repository. The site in `docs/` is served by GitHub Pages (Settings, Pages, deploy from the
+`main` branch, `/docs` folder).
 
 ## License and contributing
 

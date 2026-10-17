@@ -59,3 +59,25 @@ pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> std::io::Result<(u8,
     r.read_exact(&mut p).await?;
     Ok((h[0], p))
 }
+
+/// Blocking twins of the frame helpers, for the shim, which has no async runtime.
+pub fn write_frame_blocking<W: std::io::Write>(w: &mut W, t: u8, payload: &[u8]) -> std::io::Result<()> {
+    let mut buf = Vec::with_capacity(5 + payload.len());
+    buf.push(t);
+    buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    buf.extend_from_slice(payload);
+    w.write_all(&buf)?;
+    w.flush()
+}
+
+pub fn read_frame_blocking<R: std::io::Read>(r: &mut R) -> std::io::Result<(u8, Vec<u8>)> {
+    let mut h = [0u8; 5];
+    r.read_exact(&mut h)?;
+    let len = u32::from_be_bytes([h[1], h[2], h[3], h[4]]) as usize;
+    if len > 4 * 1024 * 1024 {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "frame too large"));
+    }
+    let mut p = vec![0u8; len];
+    r.read_exact(&mut p)?;
+    Ok((h[0], p))
+}

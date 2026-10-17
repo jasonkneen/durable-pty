@@ -18,20 +18,25 @@ pub async fn serve(http_addr: Option<String>) -> Result<()> {
     let listener = UnixListener::bind(paths::sock())?;
     std::fs::set_permissions(paths::sock(), std::fs::Permissions::from_mode(0o600))?;
     std::fs::write(paths::pid_file(), std::process::id().to_string())?;
-    mgr.recover();
+    mgr.recover().await;
     tokio::spawn(server::run_unix(mgr.clone(), listener));
 
     if let Some(addr) = http_addr {
-        let l = tokio::net::TcpListener::bind(&addr).await?;
-        let bound = l.local_addr()?.to_string();
-        let _ = rpc::HTTP_ADDR.set(bound.clone());
-        eprintln!("durable-pty: http/ws/mcp on http://{bound} (token in {})", paths::home().join("token").display());
-        let app = http::daemon_router(mgr.clone(), paths::token());
-        tokio::spawn(async move {
-            if let Err(e) = axum::serve(l, app).await {
-                eprintln!("durable-pty: http server stopped: {e}");
+        // The HTTP listener is optional: a busy port (another daemon, another DPTY_HOME) must not stop the daemon.
+        match tokio::net::TcpListener::bind(&addr).await {
+            Ok(l) => {
+                let bound = l.local_addr()?.to_string();
+                let _ = rpc::HTTP_ADDR.set(bound.clone());
+                eprintln!("durable-pty: http/ws/mcp on http://{bound} (token in {})", paths::home().join("token").display());
+                let app = http::daemon_router(mgr.clone(), paths::token());
+                tokio::spawn(async move {
+                    if let Err(e) = axum::serve(l, app).await {
+                        eprintln!("durable-pty: http server stopped: {e}");
+                    }
+                });
             }
-        });
+            Err(e) => eprintln!("durable-pty: http disabled, could not listen on {addr}: {e}"),
+        }
     }
     eprintln!("durable-pty: serving on {} (pid {})", paths::sock().display(), std::process::id());
 
@@ -46,7 +51,7 @@ pub async fn serve(http_addr: Option<String>) -> Result<()> {
             _ = hup.recv() => {}
         }
     }
-    mgr.shutdown();
+    mgr.shutdown(false);
     let _ = std::fs::remove_file(paths::sock());
     eprintln!("durable-pty: stopped; sessions are recorded and will be restored on next start");
     Ok(())

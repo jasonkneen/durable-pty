@@ -3,14 +3,15 @@ use crate::db::Db;
 use crate::model::SessionRow;
 use crate::util::{basename, now_ms, short_id};
 use anyhow::{anyhow, bail, Result};
-use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
+use crate::proto::{read_frame, write_frame};
+use crate::shim::{self, ShimSpec};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
+use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc};
 
 const RING_MAX: usize = 2 * 1024 * 1024;
@@ -24,7 +25,8 @@ pub enum Frame {
 }
 
 enum OutMsg {
-    Chunk(String, i64, i64, Vec<u8>),
+    /// session id, seq, timestamp, bytes, and the shim stream offset just past them (None for daemon-written text)
+    Chunk(String, i64, i64, Vec<u8>, Option<u64>),
     Flush(std_mpsc::Sender<()>),
 }
 
@@ -39,13 +41,20 @@ pub struct Screen {
     pub ring: Vec<u8>,
     pub seq: i64,
     pub dirty: bool,
+    /// How far into the shim's output stream the screen has been built (shim-relative bytes).
+    pub offset: u64,
 }
 
-struct Proc {
-    master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
-    killer: Box<dyn ChildKiller + Send + Sync>,
-    pid: u32,
+/// Commands for the connection to a session's shim.
+pub enum ShimCmd {
+    Input(Vec<u8>),
+    Resize(u16, u16),
+    Signal(i32),
+    Bye,
+}
+
+struct ShimLink {
+    tx: mpsc::UnboundedSender<ShimCmd>,
 }
 
 #[derive(Default)]
@@ -107,28 +116,23 @@ pub struct Live {
     pub meta: Mutex<SessionRow>,
     pub tx: broadcast::Sender<Frame>,
     pub screen: Mutex<Screen>,
-    proc: Mutex<Option<Proc>>,
+    link: Mutex<Option<ShimLink>>,
     input: Mutex<InputTracker>,
     epoch: AtomicU64,
+    /// Shim stream offset already stored in the database; bytes below it only rebuild the screen after a daemon restart.
+    consumed: AtomicU64,
+    echo: AtomicBool,
     user_killed: AtomicBool,
     force_restart: AtomicBool,
     removed: AtomicBool,
+    /// The current launch is an attempt to resume an agent conversation.
+    resuming: AtomicBool,
     out_tx: std_mpsc::Sender<OutMsg>,
     db: Arc<Db>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-fn echo_on(master: &(dyn MasterPty + Send)) -> bool {
-    if let Some(fd) = master.as_raw_fd() {
-        let mut t: libc::termios = unsafe { std::mem::zeroed() };
-        if unsafe { libc::tcgetattr(fd, &mut t) } == 0 {
-            return t.c_lflag & libc::ECHO != 0;
-        }
-    }
-    true
 }
 
 pub fn snapshot_bytes(s: &Screen) -> Vec<u8> {
@@ -138,23 +142,42 @@ pub fn snapshot_bytes(s: &Screen) -> Vec<u8> {
 }
 
 impl Live {
-    /// Single path for everything the terminal prints: parser, replay ring, durable log, live subscribers.
+    /// Text written by the daemon itself (banners): shown and stored, but not part of the shim's output stream.
     pub fn emit(&self, data: &[u8]) {
+        self.apply(data, 0, None);
+    }
+
+    /// Output from the shim starting at stream offset `start`. Anything below `consumed` was stored before a daemon
+    /// restart: it is only fed to the screen.
+    pub fn emit_at(&self, start: u64, data: &[u8]) {
+        let end = start + data.len() as u64;
+        let skip = self.consumed.load(Ordering::SeqCst).saturating_sub(start).min(data.len() as u64) as usize;
+        self.apply(data, skip, Some(end));
+    }
+
+    fn apply(&self, data: &[u8], skip: usize, end: Option<u64>) {
         let ts = now_ms();
         {
             let mut s = lock(&self.screen);
             s.parser.process(data);
-            s.ring.extend_from_slice(data);
-            if s.ring.len() > RING_MAX {
-                let cut = s.ring.len() - RING_KEEP;
-                s.ring.drain(..cut);
-            }
-            s.seq += 1;
             s.dirty = true;
-            if !self.removed.load(Ordering::Relaxed) {
-                let _ = self.out_tx.send(OutMsg::Chunk(self.id.clone(), s.seq, ts, data.to_vec()));
+            let fresh = &data[skip..];
+            if !fresh.is_empty() {
+                s.ring.extend_from_slice(fresh);
+                if s.ring.len() > RING_MAX {
+                    let cut = s.ring.len() - RING_KEEP;
+                    s.ring.drain(..cut);
+                }
+                s.seq += 1;
+                if !self.removed.load(Ordering::Relaxed) {
+                    let _ = self.out_tx.send(OutMsg::Chunk(self.id.clone(), s.seq, ts, fresh.to_vec(), end));
+                }
+                let _ = self.tx.send(Frame::Data(Arc::new(fresh.to_vec())));
             }
-            let _ = self.tx.send(Frame::Data(Arc::new(data.to_vec())));
+            if let Some(e) = end {
+                s.offset = s.offset.max(e);
+                self.consumed.fetch_max(e, Ordering::SeqCst);
+            }
         }
         lock(&self.meta).last_active_ms = ts;
     }
@@ -171,17 +194,18 @@ impl Live {
     }
 
     pub fn is_running(&self) -> bool {
-        lock(&self.proc).is_some()
+        lock(&self.link).is_some()
+    }
+
+    fn command(&self, cmd: ShimCmd) -> Result<()> {
+        let l = lock(&self.link);
+        let link = l.as_ref().ok_or_else(|| anyhow!("session is not running"))?;
+        link.tx.send(cmd).map_err(|_| anyhow!("session is not running"))
     }
 
     pub fn write_input(&self, data: &[u8]) -> Result<()> {
-        let echo = {
-            let mut p = lock(&self.proc);
-            let pr = p.as_mut().ok_or_else(|| anyhow!("session is not running"))?;
-            pr.writer.write_all(data)?;
-            pr.writer.flush()?;
-            echo_on(&*pr.master)
-        };
+        self.command(ShimCmd::Input(data.to_vec()))?;
+        let echo = self.echo.load(Ordering::SeqCst);
         let alt = lock(&self.screen).parser.screen().alternate_screen();
         let lines = lock(&self.input).feed(data, echo && !alt);
         for l in lines {
@@ -195,9 +219,7 @@ impl Live {
         if cols == 0 || rows == 0 {
             bail!("invalid size");
         }
-        if let Some(p) = lock(&self.proc).as_ref() {
-            p.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
-        }
+        let _ = self.command(ShimCmd::Resize(cols, rows));
         lock(&self.screen).parser.screen_mut().set_size(rows, cols);
         let mut m = lock(&self.meta);
         m.cols = cols;
@@ -206,17 +228,14 @@ impl Live {
     }
 
     fn signal(&self, sig: Option<i32>) -> Result<()> {
-        let mut p = lock(&self.proc);
-        let pr = p.as_mut().ok_or_else(|| anyhow!("session is not running"))?;
-        match sig {
-            Some(s) if pr.pid > 0 => unsafe {
-                if libc::killpg(pr.pid as i32, s) != 0 {
-                    libc::kill(pr.pid as i32, s);
-                }
-            },
-            _ => pr.killer.kill()?,
+        self.command(ShimCmd::Signal(sig.unwrap_or(libc::SIGHUP)))
+    }
+
+    /// Tells the shim the daemon is done with the session; it removes its files and exits.
+    fn bye(&self) {
+        if let Some(l) = lock(&self.link).take() {
+            let _ = l.tx.send(ShimCmd::Bye);
         }
-        Ok(())
     }
 }
 
@@ -365,7 +384,7 @@ impl Manager {
     }
 
     // ── lifecycle ────────────────────────────────────────────────────────────
-    pub fn create(self: &Arc<Self>, req: NewReq) -> Result<SessionRow> {
+    pub async fn create(self: &Arc<Self>, req: NewReq) -> Result<SessionRow> {
         let id = short_id();
         let mut env = req.env;
         if !env.contains_key("PATH") {
@@ -404,7 +423,7 @@ impl Manager {
         self.db.upsert_session(&row)?;
         let live = self.new_live(row, false);
         lock(&self.live).insert(id.clone(), live.clone());
-        if let Err(e) = self.start_proc(&live) {
+        if let Err(e) = self.start_proc(&live).await {
             lock(&self.live).remove(&id);
             let _ = self.db.delete_session(&id);
             return Err(e);
@@ -418,79 +437,160 @@ impl Manager {
         let (tx, _) = broadcast::channel(1024);
         let mut parser = vt100::Parser::new(row.rows, row.cols, 0);
         let mut ring = vec![];
+        let (mut consumed, mut offset) = (0, 0);
         if prime {
             parser.process(&self.db.get_screen(&row.id).unwrap_or_default());
             ring = self.db.tail_output(&row.id, RING_KEEP).unwrap_or_default();
+            (consumed, offset) = self.db.offsets(&row.id).unwrap_or((0, 0));
         }
         let seq = self.db.max_seq(&row.id).unwrap_or(0);
         Arc::new(Live {
             id: row.id.clone(),
             meta: Mutex::new(row),
             tx,
-            screen: Mutex::new(Screen { parser, ring, seq, dirty: false }),
-            proc: Mutex::new(None),
+            screen: Mutex::new(Screen { parser, ring, seq, dirty: false, offset }),
+            link: Mutex::new(None),
             input: Mutex::new(InputTracker::default()),
             epoch: AtomicU64::new(0),
+            consumed: AtomicU64::new(consumed),
+            echo: AtomicBool::new(true),
             user_killed: AtomicBool::new(false),
             force_restart: AtomicBool::new(false),
             removed: AtomicBool::new(false),
+            resuming: AtomicBool::new(false),
             out_tx: self.out_tx.clone(),
             db: self.db.clone(),
         })
     }
 
-    fn start_proc(self: &Arc<Self>, live: &Arc<Live>) -> Result<()> {
+    /// Starts the session's shim (a detached process that owns the PTY and the child) and connects to it.
+    async fn start_proc(self: &Arc<Self>, live: &Arc<Live>) -> Result<()> {
         let meta = lock(&live.meta).clone();
-        let pty = native_pty_system().openpty(PtySize { rows: meta.rows, cols: meta.cols, pixel_width: 0, pixel_height: 0 })?;
-        let mut cmd = CommandBuilder::new(&meta.cmd);
-        cmd.args(&meta.args);
-        cmd.env_clear();
-        for (k, v) in &meta.env {
-            cmd.env(k, v);
-        }
-        if !meta.env.contains_key("TERM") {
-            cmd.env("TERM", "xterm-256color");
-        }
-        if !meta.env.contains_key("COLORTERM") {
-            cmd.env("COLORTERM", "truecolor");
-        }
-        cmd.env("DPTY_SESSION", &meta.id);
         // A shell or plain process comes back where it was; an agent must start where its transcript lives.
-        let start_dir = meta.live_cwd.as_deref().filter(|d| !matches!(meta.kind.as_str(), "claude" | "codex" | "grok") && std::path::Path::new(d).is_dir()).unwrap_or(&meta.cwd);
-        cmd.cwd(start_dir);
-        let mut child = pty.slave.spawn_command(cmd).map_err(|e| anyhow!("could not start '{}': {e}", meta.cmd))?;
-        drop(pty.slave);
-        let mut reader = pty.master.try_clone_reader()?;
-        let writer = pty.master.take_writer()?;
-        let pid = child.process_id().unwrap_or(0);
+        let start_dir = meta.live_cwd.as_deref().filter(|d| !matches!(meta.kind.as_str(), "claude" | "codex" | "grok") && std::path::Path::new(d).is_dir()).unwrap_or(&meta.cwd).to_string();
+        let spec = ShimSpec { id: meta.id.clone(), cmd: meta.cmd.clone(), args: meta.args.clone(), cwd: start_dir, env: meta.env.clone(), cols: meta.cols, rows: meta.rows };
+        std::fs::create_dir_all(shim::shim_dir())?;
+        let _ = std::fs::set_permissions(shim::shim_dir(), std::os::unix::fs::PermissionsExt::from_mode(0o700));
+        let _ = std::fs::remove_file(shim::sock_path(&meta.id));
+        let _ = std::fs::remove_file(shim::err_path(&meta.id));
+        let spec_file = shim::spec_path(&meta.id);
+        std::fs::write(&spec_file, serde_json::to_vec(&spec)?)?;
+        let _ = std::fs::set_permissions(&spec_file, std::os::unix::fs::PermissionsExt::from_mode(0o600));
+
+        use std::os::unix::process::CommandExt;
+        let mut cmd = std::process::Command::new(std::env::current_exe()?);
+        cmd.arg("shim").arg(&spec_file).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        let mut child = cmd.spawn()?;
+        let mut up = false;
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            if shim::sock_path(&meta.id).exists() {
+                up = true;
+                break;
+            }
+            if let Ok(Some(_)) = child.try_wait() {
+                break;
+            }
+        }
+        // Reap the shim when it eventually exits; it is deliberately not tied to this daemon's lifetime.
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        if !up {
+            let why = std::fs::read_to_string(shim::err_path(&meta.id)).unwrap_or_else(|_| "the session helper did not start".into());
+            let _ = std::fs::remove_file(&spec_file);
+            bail!("{}", why.trim());
+        }
+        let _ = self.db.reset_offsets(&meta.id);
+        live.consumed.store(0, Ordering::SeqCst);
+        lock(&live.screen).offset = 0;
+        self.attach_shim(live, 0).await
+    }
+
+    /// Connects to a running shim, catches up on output since `from_offset`, then follows it live.
+    async fn attach_shim(self: &Arc<Self>, live: &Arc<Live>, from_offset: u64) -> Result<()> {
+        let stream = UnixStream::connect(shim::sock_path(&live.id)).await?;
+        let (mut r, mut w) = stream.into_split();
+        write_frame(&mut w, shim::D_HELLO, &from_offset.to_be_bytes()).await?;
+        let (t, ack) = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut r)).await??;
+        if t != shim::S_ACK || ack.len() < 30 {
+            bail!("unexpected reply from the session helper");
+        }
+        let base = u64::from_be_bytes(ack[0..8].try_into()?);
+        let running = ack[16] != 0;
+        let pid = u32::from_be_bytes(ack[21..25].try_into()?);
+        let cols = u16::from_be_bytes(ack[25..27].try_into()?);
+        let rows = u16::from_be_bytes(ack[27..29].try_into()?);
+        live.echo.store(ack[29] != 0, Ordering::SeqCst);
+        if from_offset < base {
+            live.emit(b"\r\n\x1b[2m[durable-pty: some output was lost while the daemon was away]\x1b[0m\r\n");
+        }
+
         let epoch = live.epoch.fetch_add(1, Ordering::SeqCst) + 1;
-        let killer = child.clone_killer();
-        *lock(&live.proc) = Some(Proc { master: pty.master, writer, killer, pid });
         live.user_killed.store(false, Ordering::SeqCst);
+        let (tx, mut rx) = mpsc::unbounded_channel::<ShimCmd>();
+        if running {
+            *lock(&live.link) = Some(ShimLink { tx });
+        }
         {
             let mut m = lock(&live.meta);
             m.status = "running".into();
-            m.pid = Some(pid);
+            m.pid = if running { Some(pid) } else { None };
             m.exit_code = None;
             m.ended_ms = None;
-            m.started_ms = now_ms();
+            if running {
+                m.cols = cols;
+                m.rows = rows;
+            }
             let _ = self.db.upsert_session(&m);
         }
-        let l = live.clone();
-        let exit_tx = self.exit_tx.clone();
-        std::thread::Builder::new().name(format!("pty-{}", live.id)).spawn(move || {
-            let mut buf = vec![0u8; 16384];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => l.emit(&buf[..n]),
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(_) => break,
+
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                let bye = matches!(cmd, ShimCmd::Bye);
+                let (t, p) = match cmd {
+                    ShimCmd::Input(d) => (shim::D_INPUT, d),
+                    ShimCmd::Resize(c, r) => {
+                        let mut p = c.to_be_bytes().to_vec();
+                        p.extend(r.to_be_bytes());
+                        (shim::D_RESIZE, p)
+                    }
+                    ShimCmd::Signal(s) => (shim::D_SIGNAL, s.to_be_bytes().to_vec()),
+                    ShimCmd::Bye => (shim::D_BYE, vec![]),
+                };
+                if write_frame(&mut w, t, &p).await.is_err() || bye {
+                    break;
                 }
             }
-            let code = child.wait().map(|s| s.exit_code() as i32).unwrap_or(-1);
-            let _ = exit_tx.send(ExitMsg { id: l.id.clone(), epoch, code });
-        })?;
+        });
+
+        let l = live.clone();
+        let exit_tx = self.exit_tx.clone();
+        let me = self.clone();
+        tokio::spawn(async move {
+            let mut exited = false;
+            while let Ok((t, p)) = read_frame(&mut r).await {
+                match t {
+                    shim::S_DATA if p.len() >= 8 => l.emit_at(u64::from_be_bytes(p[..8].try_into().unwrap()), &p[8..]),
+                    shim::S_ECHO if !p.is_empty() => l.echo.store(p[0] != 0, Ordering::SeqCst),
+                    shim::S_EXIT if p.len() == 4 => {
+                        exited = true;
+                        let _ = exit_tx.send(ExitMsg { id: l.id.clone(), epoch, code: i32::from_be_bytes(p[..4].try_into().unwrap()) });
+                    }
+                    _ => {}
+                }
+            }
+            // The connection ended without the process reporting an exit: the helper itself is gone.
+            if !exited && !me.shutting_down.load(Ordering::SeqCst) {
+                let _ = exit_tx.send(ExitMsg { id: l.id.clone(), epoch, code: -1 });
+            }
+        });
         Ok(())
     }
 
@@ -517,7 +617,24 @@ impl Manager {
             if live.epoch.load(Ordering::SeqCst) != m.epoch {
                 continue;
             }
-            *lock(&live.proc) = None;
+            live.bye();
+            // A resume that dies straight away means the agent has no such conversation: start a fresh one instead.
+            let quick_resume_failure = live.resuming.swap(false, Ordering::SeqCst)
+                && m.code != 0
+                && now_ms() - lock(&live.meta).started_ms < 20_000;
+            if quick_resume_failure && !live.user_killed.load(Ordering::SeqCst) {
+                let dropped = agents::forget_resume(&mut lock(&live.meta));
+                if dropped {
+                    live.emit(b"\r\n\x1b[2m[durable-pty: the previous conversation could not be resumed, starting a new one]\x1b[0m\r\n");
+                    self.db.add_event(Some(&m.id), "resume-failed", "starting a new conversation");
+                    let me = self.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        me.respawn(&live).await;
+                    });
+                    continue;
+                }
+            }
             let policy = lock(&live.meta).restart.clone();
             let killed = live.user_killed.load(Ordering::SeqCst);
             let forced = live.force_restart.swap(false, Ordering::SeqCst);
@@ -529,7 +646,7 @@ impl Manager {
                 let me = self.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(800)).await;
-                    me.respawn(&live);
+                    me.respawn(&live).await;
                 });
             } else {
                 if want {
@@ -540,15 +657,17 @@ impl Manager {
         }
     }
 
-    fn respawn(self: &Arc<Self>, live: &Arc<Live>) {
+    async fn respawn(self: &Arc<Self>, live: &Arc<Live>) {
         {
             let mut m = lock(&live.meta);
-            if agents::resume(&mut m) {
+            let resumed = agents::resume(&mut m);
+            live.resuming.store(resumed, Ordering::SeqCst);
+            if resumed {
                 self.db.add_event(Some(&m.id), "resume", &format!("{} {}", m.cmd, m.args.join(" ")));
             }
             m.restarts += 1;
         }
-        if let Err(e) = self.start_proc(live) {
+        if let Err(e) = self.start_proc(live).await {
             live.emit(format!("\r\n[durable-pty: restart failed: {e}]\r\n").as_bytes());
             self.db.add_event(Some(&live.id), "restart-failed", &e.to_string());
             self.finalize(live, -1);
@@ -565,7 +684,10 @@ impl Manager {
             m.pid = None;
             let _ = self.db.upsert_session(&m);
         }
-        let _ = self.db.set_screen(&live.id, &snapshot_bytes(&lock(&live.screen)));
+        {
+            let s = lock(&live.screen);
+            let _ = self.db.set_screen(&live.id, &snapshot_bytes(&s), s.offset);
+        }
         let _ = live.tx.send(Frame::Exit(code));
         lock(&self.live).remove(&live.id);
         self.db.add_event(Some(&live.id), "exited", &code.to_string());
@@ -587,6 +709,7 @@ impl Manager {
             live.removed.store(true, Ordering::SeqCst);
             live.user_killed.store(true, Ordering::SeqCst);
             let _ = live.signal(Some(libc::SIGKILL));
+            live.bye();
             lock(&self.live).remove(&id);
         }
         self.db.delete_session(&id)?;
@@ -595,7 +718,7 @@ impl Manager {
     }
 
     /// Relaunches a session, resuming the agent conversation when we know its id.
-    pub fn restart(self: &Arc<Self>, key: &str) -> Result<()> {
+    pub async fn restart(self: &Arc<Self>, key: &str) -> Result<()> {
         let id = self.resolve(key)?;
         if let Some(live) = self.live(&id) {
             if live.is_running() {
@@ -604,23 +727,40 @@ impl Manager {
             }
         }
         let row = self.db.get_session(&id)?.ok_or_else(|| anyhow!("no such session"))?;
-        self.revive(row);
+        self.revive(row).await;
         Ok(())
     }
 
-    fn revive(self: &Arc<Self>, row: SessionRow) {
+    async fn revive(self: &Arc<Self>, row: SessionRow) {
         let live = self.new_live(row, true);
         lock(&self.live).insert(live.id.clone(), live.clone());
         live.emit(b"\r\n\x1b[2m[durable-pty: session restored]\x1b[0m\r\n");
-        self.respawn(&live);
+        self.respawn(&live).await;
     }
 
-    /// Run once at boot: anything recorded as running lost its process with the previous daemon.
-    pub fn recover(self: &Arc<Self>) {
+    /// Run once at boot. A session whose helper process is still alive is reattached with nothing lost; one whose
+    /// process is gone is marked lost and, per its restart policy, relaunched.
+    pub async fn recover(self: &Arc<Self>) {
         let Ok(rows) = self.db.list_sessions() else { return };
         for mut row in rows {
             if row.status != "running" {
                 continue;
+            }
+            if UnixStream::connect(shim::sock_path(&row.id)).await.is_ok() {
+                let live = self.new_live(row.clone(), true);
+                lock(&self.live).insert(live.id.clone(), live.clone());
+                let from = lock(&live.screen).offset;
+                match self.attach_shim(&live, from).await {
+                    Ok(()) => {
+                        live.emit(b"\r\n\x1b[2m[durable-pty: daemon restarted, this session kept running]\x1b[0m\r\n");
+                        self.db.add_event(Some(&row.id), "reattached", "daemon restarted, process kept running");
+                        continue;
+                    }
+                    Err(e) => {
+                        lock(&self.live).remove(&row.id);
+                        self.db.add_event(Some(&row.id), "reattach-failed", &e.to_string());
+                    }
+                }
             }
             row.status = "lost".into();
             row.pid = None;
@@ -631,7 +771,7 @@ impl Manager {
                 let me = self.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(300)).await;
-                    me.revive(row);
+                    me.revive(row).await;
                 });
             }
         }
@@ -744,13 +884,13 @@ impl Manager {
                 let mut s = lock(&l.screen);
                 if s.dirty {
                     s.dirty = false;
-                    Some(snapshot_bytes(&s))
+                    Some((snapshot_bytes(&s), s.offset))
                 } else {
                     None
                 }
             };
-            if let Some(b) = snap {
-                let _ = self.db.set_screen(&l.id, &b);
+            if let Some((b, offset)) = snap {
+                let _ = self.db.set_screen(&l.id, &b, offset);
             }
             {
                 let mut m = lock(&l.meta);
@@ -786,21 +926,40 @@ impl Manager {
         }
     }
 
-    /// Flush everything durable. Sessions stay recorded as running so the next start recovers them.
-    pub fn shutdown(&self) {
+    /// Flush everything durable. Without `kill_sessions` the shims keep every session running and the next daemon
+    /// reattaches; with it, every session is stopped and recorded as exited.
+    pub fn shutdown(&self, kill_sessions: bool) {
         self.shutting_down.store(true, Ordering::SeqCst);
+        if kill_sessions {
+            let lives: Vec<_> = lock(&self.live).values().cloned().collect();
+            for l in lives {
+                {
+                    let mut m = lock(&l.meta);
+                    m.status = "exited".into();
+                    m.exit_code = Some(-1);
+                    m.ended_ms = Some(now_ms());
+                    m.pid = None;
+                    let _ = self.db.upsert_session(&m);
+                }
+                let _ = l.signal(Some(libc::SIGKILL));
+                l.bye();
+            }
+        }
         self.save_state();
         let (tx, rx) = std_mpsc::channel();
         if self.out_tx.send(OutMsg::Flush(tx)).is_ok() {
             let _ = rx.recv_timeout(Duration::from_secs(3));
         }
+        if kill_sessions {
+            std::thread::sleep(Duration::from_millis(200));
+        }
     }
 }
 
 fn output_writer(db: Arc<Db>, rx: std_mpsc::Receiver<OutMsg>) {
-    let mut batch: Vec<(String, i64, i64, Vec<u8>)> = vec![];
+    let mut batch: Vec<(String, i64, i64, Vec<u8>, Option<u64>)> = vec![];
     let mut last = Instant::now();
-    let flush = |batch: &mut Vec<(String, i64, i64, Vec<u8>)>| {
+    let flush = |batch: &mut Vec<(String, i64, i64, Vec<u8>, Option<u64>)>| {
         if !batch.is_empty() {
             let _ = db.append_output(batch);
             batch.clear();
@@ -808,7 +967,7 @@ fn output_writer(db: Arc<Db>, rx: std_mpsc::Receiver<OutMsg>) {
     };
     loop {
         match rx.recv_timeout(Duration::from_millis(250)) {
-            Ok(OutMsg::Chunk(a, b, c, d)) => batch.push((a, b, c, d)),
+            Ok(OutMsg::Chunk(a, b, c, d, e)) => batch.push((a, b, c, d, e)),
             Ok(OutMsg::Flush(ack)) => {
                 flush(&mut batch);
                 last = Instant::now();

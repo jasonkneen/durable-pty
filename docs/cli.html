@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CLI reference — durable-pty</title>
+<meta name="description" content="Every dpty command and flag: serve, stop, status, token, ls, new, attach, kill, rm, restart, send, logs, screen, history, events, set, tag-agent, wait, mcp, install, uninstall.">
+<meta name="theme-color" content="#0b0d10">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f6f5f2; --bg-raised: #ffffff; --ink: #14161a; --ink-dim: #4b5058; --ink-faint: #767c86;
+    --line: #dcd9d2; --line-strong: #b9b4aa; --accent: #0a5c36; --accent-ink: #ffffff;
+    --term-bg: #121414; --term-ink: #e7e9e4; --term-dim: #8a9088; --term-accent: #6bc78f; --term-border: #262a28;
+    --radius: 10px;
+    --mono: "SFMono-Regular", "JetBrains Mono", ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    --head: "Space Grotesk", var(--sans);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b0d10; --bg-raised: #141719; --ink: #eef0ee; --ink-dim: #a9afb3; --ink-faint: #767e84;
+      --line: #262a2e; --line-strong: #363b40; --accent: #5fd392; --accent-ink: #0a140f;
+      --term-bg: #0a0b0a; --term-ink: #e7e9e4; --term-dim: #70766f; --term-accent: #5fd392; --term-border: #1c1f1d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); line-height: 1.55; overflow-x: hidden; }
+  a { color: var(--accent); text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
+  a:hover { text-decoration-color: currentColor; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+  h1, h2, h3 { font-family: var(--head); font-weight: 600; letter-spacing: -0.01em; color: var(--ink); margin: 0 0 12px; }
+  code.inline { font-family: var(--mono); font-size: 0.88em; background: var(--bg-raised); border: 1px solid var(--line); border-radius: 4px; padding: 0.08em 0.4em; }
+
+  .topbar { display: flex; align-items: center; justify-content: space-between; padding: 20px 16px; max-width: 1080px; margin: 0 auto; gap: 12px; flex-wrap: wrap; }
+  @media (min-width: 640px) { .topbar { padding: 20px 32px; } }
+  .logo { display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); font-weight: 600; font-size: 1rem; }
+  .logo .dot { color: var(--accent); }
+  .topnav { display: flex; gap: 16px; font-size: 0.88rem; flex-wrap: wrap; }
+  .topnav a { color: var(--ink-dim); white-space: nowrap; }
+  .topnav a[aria-current="page"] { color: var(--ink); font-weight: 600; }
+
+  .doc-wrap { max-width: 1080px; margin: 0 auto; padding: 0 16px 72px; }
+  @media (min-width: 640px) { .doc-wrap { padding: 0 32px 80px; } }
+  .doc-head { padding: 12px 0 32px; border-bottom: 1px solid var(--line); margin-bottom: 32px; }
+  .doc-head p { color: var(--ink-dim); max-width: 60ch; margin: 10px 0 0; }
+  .kicker { font-family: var(--mono); font-size: 0.78rem; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.08em; margin: 0 0 8px; }
+
+  .doc-page { display: flex; gap: 48px; align-items: flex-start; }
+  .doc-side { flex: 0 0 190px; position: sticky; top: 24px; }
+  .doc-side nav ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; font-size: 0.86rem; }
+  .doc-side a { color: var(--ink-dim); }
+  .doc-side a:hover { color: var(--ink); }
+  .doc-main { flex: 1 1 auto; min-width: 0; }
+  .doc-toc { display: none; margin-bottom: 28px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-raised); }
+  .doc-toc summary { padding: 12px 16px; cursor: pointer; font-family: var(--mono); font-size: 0.85rem; list-style: none; }
+  .doc-toc summary::-webkit-details-marker { display: none; }
+  .doc-toc ul { list-style: none; margin: 0; padding: 0 16px 16px; display: flex; flex-direction: column; gap: 8px; font-size: 0.9rem; }
+  @media (max-width: 860px) { .doc-side { display: none; } .doc-toc { display: block; } }
+
+  section.doc { padding: 0 0 40px; }
+  section.doc h2 { font-size: 1.3rem; margin-bottom: 10px; scroll-margin-top: 20px; }
+  section.doc > p.group-lede { color: var(--ink-dim); max-width: 66ch; margin: 0 0 18px; }
+  section.doc + section.doc { border-top: 1px solid var(--line); padding-top: 36px; }
+
+  .cmd { border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-raised); padding: 16px 18px; margin-bottom: 14px; }
+  .cmd-sig { font-family: var(--mono); font-size: 0.92rem; color: var(--ink); background: var(--term-bg); color: var(--term-ink); border: 1px solid var(--term-border); border-radius: 6px; padding: 8px 12px; overflow-x: auto; white-space: pre; margin-bottom: 10px; }
+  .cmd p { color: var(--ink-dim); margin: 0 0 10px; font-size: 0.94rem; }
+  .flags { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  .flags li { font-size: 0.88rem; color: var(--ink-dim); display: flex; gap: 10px; }
+  .flags code { font-family: var(--mono); font-size: 0.88em; color: var(--accent); flex: none; white-space: nowrap; }
+
+  footer { border-top: 1px solid var(--line); padding: 40px 0 56px; max-width: 1080px; margin: 0 auto; }
+  .footer-links { display: flex; flex-wrap: wrap; gap: 16px 22px; font-size: 0.9rem; padding: 0 16px; }
+  @media (min-width: 640px) { .footer-links { padding: 0 32px; } }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <a class="logo" href="index.html">dpty<span class="dot">.</span></a>
+  <nav class="topnav" aria-label="Site">
+    <a href="index.html">Home</a>
+    <a href="getting-started.html">Getting started</a>
+    <a href="cli.html" aria-current="page">CLI</a>
+    <a href="agents.html">Agents</a>
+    <a href="mcp-and-api.html">MCP &amp; API</a>
+    <a href="how-it-works.html">How it works</a>
+  </nav>
+</div>
+
+<main class="doc-wrap">
+  <div class="doc-head">
+    <p class="kicker">Reference</p>
+    <h1>CLI reference</h1>
+    <p>Every <code class="inline">dpty</code> subcommand and flag, taken from the command definitions in <code class="inline">src/main.rs</code>. <code class="inline">id</code> accepts a session's id, name or label.</p>
+  </div>
+
+  <details class="doc-toc">
+    <summary>In this reference</summary>
+    <ul>
+      <li><a href="#daemon">Daemon</a></li>
+      <li><a href="#sessions">Sessions</a></li>
+      <li><a href="#interact">Interacting with a session</a></li>
+      <li><a href="#observe">Reading history and events</a></li>
+      <li><a href="#mcp">MCP</a></li>
+    </ul>
+  </details>
+
+  <div class="doc-page">
+    <aside class="doc-side">
+      <nav aria-label="Sections">
+        <ul>
+          <li><a href="#daemon">Daemon</a></li>
+          <li><a href="#sessions">Sessions</a></li>
+          <li><a href="#interact">Interacting</a></li>
+          <li><a href="#observe">History &amp; events</a></li>
+          <li><a href="#mcp">MCP</a></li>
+        </ul>
+      </nav>
+    </aside>
+
+    <div class="doc-main">
+      <section class="doc" id="daemon">
+        <h2>Daemon</h2>
+        <p class="group-lede">Clients start the daemon automatically; these commands manage it directly.</p>
+
+        <div class="cmd">
+          <div class="cmd-sig">dpty serve [--http ADDR] [--no-http]</div>
+          <p>Runs the daemon in the foreground. Clients start it automatically; use <code class="inline">install</code> to run it at login instead.</p>
+          <ul class="flags">
+            <li><code>--http ADDR</code> HTTP/WebSocket listen address (default <code class="inline">127.0.0.1:7878</code>)</li>
+            <li><code>--no-http</code> disable the HTTP listener entirely</li>
+          </ul>
+        </div>
+
+        <div class="cmd">
+          <div class="cmd-sig">dpty stop [--sessions]</div>
+          <p>Stops the daemon. By default sessions keep running in their shims and the next daemon start picks them back up with nothing lost.</p>
+          <ul class="flags">
+            <li><code>--sessions</code> also stop every session, instead of leaving them running</li>
+          </ul>
+        </div>
+
+        <div class="cmd">
+          <div class="cmd-sig">dpty status</div>
+          <p>Prints daemon status as JSON. Exits with code 3 if the daemon is not running.</p>
+        </div>
+
+        <div class="cmd">
+          <div class="cmd-sig">dpty token</div>
+          <p>Prints the bearer token used by the HTTP, WebSocket and MCP-over-HTTP listeners.</p>
+        </div>
+
+        <div class="cmd">
+          <div class="cmd-sig">dpty install [--http ADDR] [--no-http]</div>
+          <p>Installs a login service — launchd on macOS, <code class="inline">systemd --user</code> on Linux — that runs the daemon and restarts it if it exits.</p>
+          <ul class="flags">
+            <li><code>--http ADDR</code> HTTP/WebSocket listen address (default <code class="inline">127.0.0.1:7878</code>)</li>
+            <li><code>--no-http</code> disable the HTTP listener for the installed service</li>
+          </ul>
+        </div>
+
+        <div class="cmd">
+          <div class="cmd-sig">dpty uninstall</div>
+          <p>Removes the login service. Sessions and history in <code class="inline">~/.durable-pty</code> are kept.</p>
+        </div>
+      </section>
+
+      <section class="doc" id="sessions">
+        <h2>Sessions</h2>
+        <p class="group-lede">Create, list and manage sessions.</p>
+
+        <div class="cmd">
+          <div class="cmd-sig">dpty ls [--json] [-l/--label LABEL]... [--status STATUS]</div>
+          <p>Lists sessions.</p>
+          <ul class="flags">
+            <li><code>--json</code> print the full session list as JSON</li>
+            <li><code>-l, --label LABEL</code> filter by label, repeatable</li>
+            <li><code>--status STATUS</code> filter by status (e.g. <code class="inline">running</code>, <code class="inline">lost</code>)</li>
+          </ul>
+        </div>
+
+        <div class="cmd">
+          <div class="cmd-sig">dpty new [-n NAME] [-C CWD] [-l LABEL]... [-e KEY=VALUE]... [--env-all]
+         [-d/--detach] [--restart POLICY] [--kind KIND] [--resume-cmd CMD] -- CMD...</div>
+          <p>Starts a session. Example: <code class="inline">dpty new -n work -C ~/proj -- claude "fix the bug"</code>.</p>
+          <ul class="flags">
+            <li><code>-n, --name NAME</code> a short name to attach by later</li>
+            <li><code>-C, --cwd CWD</code> working directory (default: current directory)</li>
+            <li><code>-l, --label LABEL</code> arbitrary <code class="inline">key=value</code> label, repeatable</li>
+            <li><code>-e, --env KEY=VALUE</code> extra environment variable, repeatable</li>
+            <li><code>--env-all</code> pass the whole environment (default passes PATH, HOME, locale and agent API variables only)</li>
+            <li><code>-d, --detach</code> create the session without attaching to it</li>
+            <li><code>--restart POLICY</code> <code class="inline">never</code>, <code class="inline">on-failure</code> or <code class="inline">always</code></li>
+            <li><code>--kind KIND</code> force the agent adapter instead of detecting it from the command</li>
+            <li><code>--resume-cmd CMD</code> how to resume an agent with no built-in adapter, e.g. <code class="inline">"grok --resume {id}"</code></li>
+          </ul>
+        </div>
+
+        <div class="cmd">
+          <div class="cmd-sig">dpty attach ID</div>
+          <p>Attaches this terminal to a running session. Detach with <code class="inline">Ctrl-\</code> without stopping it.</p>
+        </div>
+
+        <div class="cmd">
+          <div class="cmd-sig">dpty kill ID [-s/--signal SIGNAL]</div>
+          <p>Sends a signal to the session's process.</p>
+          <ul class="flags">
+            <li><code>-s, --signal SIGNAL</code> e.g. <code class="inline">TERM</code>, <code class="inline">KILL</code> (default: the process's normal termination signal)</li>
+          </ul>
+        </div>
+
+        <div class="cmd">
+          <div class="cmd-sig">dpty rm ID</div>
+          <p>Deletes a session and its stored history.</p>
+        </div>
+
+        <div class="cmd">
+          <div class="cmd-sig">dpty restart ID</div>
+          <p>Relaunches a session, resuming the agent conversation when its id is known.</p>
+        </div>
+
+        <div class="cmd">
+          <div class="cmd-sig">dpty set ID [--name NAME] [-l LABEL]... [--restart POLICY]</div>
+          <p>Updates a session's name, labels or restart policy without restarting it.</p>
+          <ul class="flags">
+            <li><code>--name NAME</code> rename the session</li>
+            <li><code>-l, --label LABEL</code> set a <code class="inline">key=value</code> label, repeatable</li>
+            <li><code>--restart POLICY</code> <code class="inline">never</code>, <code class="inline">on-failure</code> or <code class="inline">always</code></li>
+          </ul>
+        </div>
+
+        <div class="cmd">
+          <div class="cmd-sig">dpty tag-agent ID AGENT_SESSION_ID</div>
+          <p>Records an agent's own session id, for use from a hook: <code class="inline">dpty tag-agent "$DPTY_SESSION" &lt;id&gt;</code>.</p>
+        </div>
+      </section>
+
+      <section class="doc" id="interact">
+        <h2>Interacting with a session</h2>
+
+        <div class="cmd">
+          <div class="cmd-sig">dpty send ID TEXT... [--no-enter] [-k/--key KEY]...</div>
+          <p>Types into a session.</p>
+          <ul class="flags">
+            <li><code>--no-enter</code> do not send a trailing Enter after the text</li>
+            <li><code>-k, --key KEY</code> send a named key instead, e.g. <code class="inline">ctrl-c</code>, repeatable</li>
+          </ul>
+        </div>
+
+        <div class="cmd">
+          <div class="cmd-sig">dpty screen ID</div>
+          <p>Prints the session's current screen as plain text.</p>
+        </div>
+
+        <div class="cmd">
+          <div class="cmd-sig">dpty wait ID PATTERN [--timeout SECONDS]</div>
+          <p>Blocks until a pattern appears in the session's output. Exits with code 2 on timeout.</p>
+          <ul class="flags">
+            <li><code>--timeout SECONDS</code> default 30</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="doc" id="observe">
+        <h2>Reading history and events</h2>
+
+        <div class="cmd">
+          <div class="cmd-sig">dpty logs ID [-n/--bytes N] [--raw]</div>
+          <p>Reads output from a session.</p>
+          <ul class="flags">
+            <li><code>-n, --bytes N</code> how many bytes to read (default 65536)</li>
+            <li><code>--raw</code> write the raw bytes instead of decoded text</li>
+          </ul>
+        </div>
+
+        <div class="cmd">
+          <div class="cmd-sig">dpty history ID [-n/--limit N]</div>
+          <p>Lists commands typed into a session.</p>
+          <ul class="flags">
+            <li><code>-n, --limit N</code> default 100</li>
+          </ul>
+        </div>
+
+        <div class="cmd">
+          <div class="cmd-sig">dpty events [ID] [-n/--limit N]</div>
+          <p>Lists daemon events, optionally filtered to one session.</p>
+          <ul class="flags">
+            <li><code>-n, --limit N</code> default 50</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="doc" id="mcp">
+        <h2>MCP</h2>
+
+        <div class="cmd">
+          <div class="cmd-sig">dpty mcp [--http ADDR] [--no-auth]</div>
+          <p>Runs the MCP server. With no flags, serves over stdio. With <code class="inline">--http</code>, serves streamable HTTP (<code class="inline">POST /mcp</code>) and legacy SSE (<code class="inline">GET /sse</code>).</p>
+          <ul class="flags">
+            <li><code>--http ADDR</code> listen address for streamable HTTP + SSE instead of stdio</li>
+            <li><code>--no-auth</code> do not require the bearer token on the HTTP listener</li>
+          </ul>
+        </div>
+      </section>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <div class="footer-links">
+    <a href="https://github.com/jasonkneen/durable-pty">GitHub repo</a>
+    <a href="https://github.com/jasonkneen/durable-pty/blob/main/README.md">README</a>
+    <a href="https://github.com/jasonkneen/durable-pty/blob/main/LICENSE">LICENSE (MIT)</a>
+    <a href="https://github.com/jasonkneen/durable-pty/blob/main/CONTRIBUTING.md">Contributing</a>
+  </div>
+</footer>
+</body>
+</html>

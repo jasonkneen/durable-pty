@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MCP &amp; API — durable-pty</title>
+<meta name="description" content="dpty's MCP tools and config, the HTTP endpoints, the bearer token, and the unix socket RPC.">
+<meta name="theme-color" content="#0b0d10">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f6f5f2; --bg-raised: #ffffff; --ink: #14161a; --ink-dim: #4b5058; --ink-faint: #767c86;
+    --line: #dcd9d2; --line-strong: #b9b4aa; --accent: #0a5c36; --accent-ink: #ffffff;
+    --term-bg: #121414; --term-ink: #e7e9e4; --term-dim: #8a9088; --term-accent: #6bc78f; --term-border: #262a28;
+    --radius: 10px;
+    --mono: "SFMono-Regular", "JetBrains Mono", ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    --head: "Space Grotesk", var(--sans);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b0d10; --bg-raised: #141719; --ink: #eef0ee; --ink-dim: #a9afb3; --ink-faint: #767e84;
+      --line: #262a2e; --line-strong: #363b40; --accent: #5fd392; --accent-ink: #0a140f;
+      --term-bg: #0a0b0a; --term-ink: #e7e9e4; --term-dim: #70766f; --term-accent: #5fd392; --term-border: #1c1f1d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); line-height: 1.55; overflow-x: hidden; }
+  a { color: var(--accent); text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
+  a:hover { text-decoration-color: currentColor; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+  h1, h2, h3 { font-family: var(--head); font-weight: 600; letter-spacing: -0.01em; color: var(--ink); margin: 0 0 12px; }
+  code.inline { font-family: var(--mono); font-size: 0.88em; background: var(--bg-raised); border: 1px solid var(--line); border-radius: 4px; padding: 0.08em 0.4em; }
+
+  .topbar { display: flex; align-items: center; justify-content: space-between; padding: 20px 16px; max-width: 1080px; margin: 0 auto; gap: 12px; flex-wrap: wrap; }
+  @media (min-width: 640px) { .topbar { padding: 20px 32px; } }
+  .logo { display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); font-weight: 600; font-size: 1rem; }
+  .logo .dot { color: var(--accent); }
+  .topnav { display: flex; gap: 16px; font-size: 0.88rem; flex-wrap: wrap; }
+  .topnav a { color: var(--ink-dim); white-space: nowrap; }
+  .topnav a[aria-current="page"] { color: var(--ink); font-weight: 600; }
+
+  .doc-wrap { max-width: 1080px; margin: 0 auto; padding: 0 16px 72px; }
+  @media (min-width: 640px) { .doc-wrap { padding: 0 32px 80px; } }
+  .doc-head { padding: 12px 0 32px; border-bottom: 1px solid var(--line); margin-bottom: 32px; }
+  .doc-head p { color: var(--ink-dim); max-width: 60ch; margin: 10px 0 0; }
+  .kicker { font-family: var(--mono); font-size: 0.78rem; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.08em; margin: 0 0 8px; }
+
+  .doc-page { display: flex; gap: 48px; align-items: flex-start; }
+  .doc-side { flex: 0 0 190px; position: sticky; top: 24px; }
+  .doc-side nav ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; font-size: 0.86rem; }
+  .doc-side a { color: var(--ink-dim); }
+  .doc-side a:hover { color: var(--ink); }
+  .doc-main { flex: 1 1 auto; min-width: 0; }
+  .doc-toc { display: none; margin-bottom: 28px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-raised); }
+  .doc-toc summary { padding: 12px 16px; cursor: pointer; font-family: var(--mono); font-size: 0.85rem; list-style: none; }
+  .doc-toc summary::-webkit-details-marker { display: none; }
+  .doc-toc ul { list-style: none; margin: 0; padding: 0 16px 16px; display: flex; flex-direction: column; gap: 8px; font-size: 0.9rem; }
+  @media (max-width: 860px) { .doc-side { display: none; } .doc-toc { display: block; } }
+
+  section.doc { padding: 0 0 40px; }
+  section.doc h2 { font-size: 1.3rem; margin-bottom: 10px; scroll-margin-top: 20px; }
+  section.doc p { color: var(--ink-dim); max-width: 66ch; margin: 0 0 14px; }
+  section.doc + section.doc { border-top: 1px solid var(--line); padding-top: 36px; }
+
+  .snippet { background: var(--term-bg); border: 1px solid var(--term-border); border-radius: var(--radius); color: var(--term-ink); font-family: var(--mono); font-size: 0.85rem; padding: 16px; overflow-x: auto; white-space: pre; margin: 0 0 14px; }
+  .snippet .k { color: var(--term-accent); }
+  .snippet .s { color: #d8c893; }
+
+  ul.plain { margin: 0 0 14px; padding: 0; list-style: none; }
+  ul.plain li { padding: 10px 0; border-bottom: 1px solid var(--line); display: flex; gap: 10px; font-size: 0.94rem; color: var(--ink-dim); }
+  ul.plain li:last-child { border-bottom: none; }
+  ul.plain code { font-family: var(--mono); font-size: 0.88em; color: var(--accent); flex: none; }
+
+  table.ep { width: 100%; border-collapse: collapse; font-size: 0.92rem; margin: 0 0 16px; }
+  table.ep th, table.ep td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+  table.ep th { font-family: var(--mono); font-size: 0.76rem; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.05em; }
+  table.ep code { font-family: var(--mono); font-size: 0.88em; }
+
+  footer { border-top: 1px solid var(--line); padding: 40px 0 56px; max-width: 1080px; margin: 0 auto; }
+  .footer-links { display: flex; flex-wrap: wrap; gap: 16px 22px; font-size: 0.9rem; padding: 0 16px; }
+  @media (min-width: 640px) { .footer-links { padding: 0 32px; } }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <a class="logo" href="index.html">dpty<span class="dot">.</span></a>
+  <nav class="topnav" aria-label="Site">
+    <a href="index.html">Home</a>
+    <a href="getting-started.html">Getting started</a>
+    <a href="cli.html">CLI</a>
+    <a href="agents.html">Agents</a>
+    <a href="mcp-and-api.html" aria-current="page">MCP &amp; API</a>
+    <a href="how-it-works.html">How it works</a>
+  </nav>
+</div>
+
+<main class="doc-wrap">
+  <div class="doc-head">
+    <p class="kicker">Reference</p>
+    <h1>MCP &amp; API</h1>
+    <p>Three surfaces, one shared RPC underneath: the unix socket, HTTP/WebSocket, and MCP.</p>
+  </div>
+
+  <details class="doc-toc">
+    <summary>In this reference</summary>
+    <ul>
+      <li><a href="#mcp-tools">MCP tools</a></li>
+      <li><a href="#mcp-config">MCP config</a></li>
+      <li><a href="#http">HTTP endpoints</a></li>
+      <li><a href="#socket">Unix socket</a></li>
+    </ul>
+  </details>
+
+  <div class="doc-page">
+    <aside class="doc-side">
+      <nav aria-label="Sections">
+        <ul>
+          <li><a href="#mcp-tools">MCP tools</a></li>
+          <li><a href="#mcp-config">MCP config</a></li>
+          <li><a href="#http">HTTP endpoints</a></li>
+          <li><a href="#socket">Unix socket</a></li>
+        </ul>
+      </nav>
+    </aside>
+
+    <div class="doc-main">
+      <section class="doc" id="mcp-tools">
+        <h2>MCP tools</h2>
+        <p>Served over stdio by default, or over streamable HTTP and legacy SSE with <code class="inline">dpty mcp --http ADDR</code>.</p>
+        <ul class="plain">
+          <li><code>pty_list</code> list every session and its state</li>
+          <li><code>pty_new</code> start a new session</li>
+          <li><code>pty_send</code> type into a session</li>
+          <li><code>pty_screen</code> read the current screen</li>
+          <li><code>pty_logs</code> read raw output</li>
+          <li><code>pty_wait</code> block until a pattern appears</li>
+          <li><code>pty_history</code> read typed commands and events</li>
+          <li><code>pty_restart</code> restart a session</li>
+          <li><code>pty_kill</code> stop a session</li>
+        </ul>
+      </section>
+
+      <section class="doc" id="mcp-config">
+        <h2>MCP config</h2>
+        <p>Point an MCP client at the stdio server with:</p>
+        <div class="snippet">{<br>&nbsp;&nbsp;<span class="k">"mcpServers"</span>: {<br>&nbsp;&nbsp;&nbsp;&nbsp;<span class="k">"dpty"</span>: {<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="k">"command"</span>: <span class="s">"dpty"</span>,<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="k">"args"</span>: [<span class="s">"mcp"</span>]<br>&nbsp;&nbsp;&nbsp;&nbsp;}<br>&nbsp;&nbsp;}<br>}</div>
+        <p>For streamable HTTP or SSE instead, run <code class="inline">dpty mcp --http 127.0.0.1:7979</code> and point the client at <code class="inline">POST /mcp</code> or <code class="inline">GET /sse</code> + <code class="inline">POST /messages</code> with the bearer token from <code class="inline">dpty token</code> (or start it with <code class="inline">--no-auth</code> to skip the token).</p>
+      </section>
+
+      <section class="doc" id="http">
+        <h2>HTTP endpoints</h2>
+        <p>Default listen address <code class="inline">127.0.0.1:7878</code>, disabled with <code class="inline">--no-http</code> on <code class="inline">serve</code> or <code class="inline">install</code>. Every endpoint except <code class="inline">/health</code> needs the bearer token printed by <code class="inline">dpty token</code>.</p>
+        <table class="ep">
+          <thead><tr><th scope="col">Endpoint</th><th scope="col">What it does</th></tr></thead>
+          <tbody>
+            <tr><td><code>GET /health</code></td><td>Liveness check. No token required.</td></tr>
+            <tr><td><code>POST /rpc</code></td><td>The same JSON RPC the unix socket and CLI use.</td></tr>
+            <tr><td><code>GET /ws</code></td><td>WebSocket attach: binary frames are terminal bytes, text frames are JSON control messages such as resize.</td></tr>
+            <tr><td><code>POST /mcp</code></td><td>MCP streamable HTTP, when <code class="inline">dpty mcp --http</code> is running.</td></tr>
+            <tr><td><code>GET /sse</code> + <code>POST /messages</code></td><td>Legacy MCP transport, same <code class="inline">--http</code> listener.</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="doc" id="socket">
+        <h2>Unix socket</h2>
+        <p><code class="inline">~/.durable-pty/dpty.sock</code> (mode 0600, local to the machine). JSON lines in and out; an <code class="inline">attach</code> call upgrades the connection to binary frames for live terminal I/O. The CLI and the MCP stdio server both use this socket — it is the one RPC surface everything else sits on top of.</p>
+      </section>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <div class="footer-links">
+    <a href="https://github.com/jasonkneen/durable-pty">GitHub repo</a>
+    <a href="https://github.com/jasonkneen/durable-pty/blob/main/README.md">README</a>
+    <a href="https://github.com/jasonkneen/durable-pty/blob/main/LICENSE">LICENSE (MIT)</a>
+    <a href="https://github.com/jasonkneen/durable-pty/blob/main/CONTRIBUTING.md">Contributing</a>
+  </div>
+</footer>
+</body>
+</html>

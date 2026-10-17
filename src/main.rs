@@ -11,6 +11,7 @@ mod proto;
 mod rpc;
 mod server;
 mod session;
+mod shim;
 mod util;
 
 use anyhow::{bail, Result};
@@ -42,8 +43,15 @@ enum Cmd {
         #[arg(long)]
         no_http: bool,
     },
-    /// Stop the daemon. Sessions are recorded and restored on the next start
-    Stop,
+    /// Stop the daemon. Sessions keep running and the next daemon picks them up again
+    Stop {
+        /// Also stop every session
+        #[arg(long)]
+        sessions: bool,
+    },
+    /// Internal: the helper process that owns one session's terminal
+    #[command(hide = true)]
+    Shim { spec: String },
     /// Daemon status
     Status,
     /// Print the bearer token for the HTTP/WebSocket/MCP listener
@@ -102,6 +110,9 @@ enum Cmd {
         no_enter: bool,
         #[arg(short, long)]
         key: Vec<String>,
+        /// Pause between the text and Enter, so full-screen agents do not read them as one paste (default: 150 ms, 1500 ms for agents)
+        #[arg(long)]
+        enter_delay_ms: Option<u64>,
     },
     Logs {
         id: String,
@@ -165,10 +176,19 @@ fn kv(items: &[String], what: &str) -> Result<BTreeMap<String, String>> {
         .collect()
 }
 
+/// Variables an agent sets to describe ITS OWN session (id, parent link, socket). A child agent started with them thinks
+/// it is a sub-session: Claude Code, for one, stops saving its transcript. They never belong in a new session.
+fn is_session_marker(key: &str) -> bool {
+    key == "CLAUDECODE"
+        || (key.starts_with("CLAUDE_CODE_")
+            && ["SESSION", "MESSAGING", "ENTRYPOINT", "EXECPATH", "PARENT", "BRIDGE", "SOCKET"].iter().any(|m| key.contains(m)))
+        || (key.starts_with("CODEX_") && ["SESSION", "THREAD", "PARENT"].iter().any(|m| key.contains(m)))
+}
+
 fn capture_env(all: bool) -> BTreeMap<String, String> {
     const KEEP: &[&str] = &["PATH", "HOME", "SHELL", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "SSH_AUTH_SOCK", "TERM_PROGRAM"];
     const PREFIX: &[&str] = &["XDG_", "ANTHROPIC_", "OPENAI_", "CODEX_", "CLAUDE_", "XAI_", "GROK_", "GOOGLE_", "GEMINI_", "NVM_", "VOLTA_"];
-    std::env::vars().filter(|(k, _)| all || KEEP.contains(&k.as_str()) || PREFIX.iter().any(|p| k.starts_with(p))).collect()
+    std::env::vars().filter(|(k, _)| (all || KEEP.contains(&k.as_str()) || PREFIX.iter().any(|p| k.starts_with(p))) && !is_session_marker(k)).collect()
 }
 
 fn age(ms: i64) -> String {
@@ -313,10 +333,11 @@ async fn main() {
 async fn run(cli: Cli) -> Result<()> {
     match cli.cmd {
         Cmd::Serve { http, no_http } => daemon::serve((!no_http).then_some(http)).await?,
-        Cmd::Stop => match Client::connect().await {
+        Cmd::Shim { spec } => shim::run(&spec)?,
+        Cmd::Stop { sessions } => match Client::connect().await {
             Ok(mut c) => {
-                c.call("shutdown", json!({})).await?;
-                println!("stopped (sessions are restored on next start)");
+                c.call("shutdown", json!({"kill_sessions": sessions})).await?;
+                println!("{}", if sessions { "stopped, and every session was stopped" } else { "stopped (sessions keep running and are picked up again on next start)" });
             }
             Err(_) => println!("not running"),
         },
@@ -368,9 +389,9 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Restart { id } => {
             call("restart", json!({"id": id})).await?;
         }
-        Cmd::Send { id, text, no_enter, key } => {
+        Cmd::Send { id, text, no_enter, key, enter_delay_ms } => {
             let t = text.join(" ");
-            call("send", json!({"id": id, "text": t, "enter": !no_enter && !t.is_empty(), "keys": key})).await?;
+            call("send", json!({"id": id, "text": t, "enter": !no_enter && !t.is_empty(), "keys": key, "enter_delay_ms": enter_delay_ms})).await?;
         }
         Cmd::Logs { id, bytes, raw } => {
             if raw {
