@@ -5,6 +5,9 @@
 set -euo pipefail
 tag="${1:?tag, e.g. v0.1.1}"; mode="${2:-source}"; dist="${3:-}"
 repo="${DPTY_REPO:-jasonkneen/durable-pty}"
+# While the repository is private, Homebrew can only fetch the source over ssh (its sandboxed git has no https credentials).
+# Set DPTY_GIT_URL=https://github.com/$repo.git once the repository is public.
+git_url="${DPTY_GIT_URL:-ssh://git@github.com/$repo.git}"
 version="${tag#v}"
 header() { cat <<RUBY
 class Dpty < Formula
@@ -37,8 +40,8 @@ if [ "$mode" = source ]; then
   rev="$(git rev-list -n 1 "$tag" 2>/dev/null || git ls-remote "https://github.com/$repo.git" "refs/tags/$tag^{}" | cut -f1)"
   [ -n "$rev" ] || { echo "cannot find the commit for $tag" >&2; exit 1; }
   cat <<RUBY
-  url "https://github.com/$repo.git", tag: "$tag", revision: "$rev"
-  head "https://github.com/$repo.git", branch: "main"
+  url "$git_url", tag: "$tag", revision: "$rev"
+  head "$git_url", branch: "main"
 
   depends_on "rust" => :build
 

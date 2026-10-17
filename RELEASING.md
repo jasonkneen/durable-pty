@@ -43,8 +43,10 @@ scripts/gen-formula.sh v0.1.1 source > /path/to/homebrew-tap/Formula/dpty.rb    
 scripts/gen-formula.sh v0.1.1 binary dist > /path/to/homebrew-tap/Formula/dpty.rb  # public repository: uses the release tarballs
 ```
 
-While this repository is private the formula builds from the tagged source (Homebrew needs git access to the repository,
-for example `gh auth login` or an ssh key). Once it is public the workflow switches to the prebuilt binaries by itself.
+While this repository is private the formula builds from the tagged source, fetched over ssh (`ssh://git@github.com/...`):
+Homebrew's sandboxed git has no https credentials, so an ssh key with access to the repository is required, and Homebrew's
+Rust is a build dependency. `brew fetch --formula --build-from-source jasonkneen/tap/dpty` checks the source download without
+installing anything. Once the repository is public the workflow switches to the prebuilt binaries by itself.
 
 ## Making the repository public
 
