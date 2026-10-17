@@ -3,13 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>durable-pty — PTY sessions that outlive your app</title>
-<meta name="description" content="dpty is a PTY session daemon, CLI and MCP server. Sessions, scrollback and typed commands live in SQLite, not in your app, so a crash never takes a terminal with it.">
+<title>Durable PTY — terminals that don't die with your app</title>
+<meta name="description" content="Durable PTY (dpty) is a daemon, CLI and MCP server that keeps shells and AI coding agents running through app crashes and daemon restarts, and resumes them after a reboot.">
 <meta name="theme-color" content="#0b0d10">
-<meta property="og:title" content="durable-pty (dpty)">
-<meta property="og:description" content="PTY sessions that live in a daemon, stored in SQLite, resumed after a crash — including claude and codex agent sessions.">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta property="og:title" content="Durable PTY">
+<meta property="og:description" content="Terminals that don't die with your app. PTY sessions live in a daemon, stored in SQLite, resumed after a crash — including claude and codex agent sessions.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://jasonkneen.github.io/durable-pty/">
+<meta property="og:image" content="https://jasonkneen.github.io/durable-pty/assets/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://jasonkneen.github.io/durable-pty/assets/og.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
@@ -22,16 +27,16 @@
     --ink-faint: #767c86;
     --line: #dcd9d2;
     --line-strong: #b9b4aa;
-    --accent: #0a5c36;
+    --accent: #0f766e;
     --accent-ink: #ffffff;
     --term-bg: #121414;
     --term-ink: #e7e9e4;
     --term-dim: #8a9088;
-    --term-accent: #6bc78f;
+    --term-accent: #5eead4;
     --term-border: #262a28;
     --ok: #0a5c36;
     --warn: #8a5a00;
-    --bad: #8a1f1f;
+    --bad: #b3261e;
     --radius: 10px;
     --mono: "SFMono-Regular", "JetBrains Mono", ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
@@ -47,16 +52,16 @@
       --ink-faint: #767e84;
       --line: #262a2e;
       --line-strong: #363b40;
-      --accent: #5fd392;
+      --accent: #5eead4;
       --accent-ink: #0a140f;
       --term-bg: #0a0b0a;
       --term-ink: #e7e9e4;
       --term-dim: #70766f;
-      --term-accent: #5fd392;
+      --term-accent: #5eead4;
       --term-border: #1c1f1d;
       --ok: #5fd392;
       --warn: #e3b24c;
-      --bad: #e16767;
+      --bad: #ef8585;
     }
   }
 
@@ -84,7 +89,7 @@
   h1, h2, h3 { font-family: var(--head); font-weight: 600; letter-spacing: -0.01em; color: var(--ink); margin: 0; }
 
   .wrap {
-    max-width: 920px;
+    max-width: 1120px;
     margin: 0 auto;
     padding: 0 16px;
   }
@@ -93,32 +98,57 @@
   section { padding: 64px 0; border-top: 1px solid var(--line); }
   section:first-of-type, #hero { border-top: none; }
 
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
   /* ---------- top bar ---------- */
+  .site-header { position: sticky; top: 0; z-index: 40; background: var(--bg); border-bottom: 1px solid var(--line); }
   .topbar {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 20px 16px;
-    max-width: 920px;
+    padding: 16px 16px;
+    max-width: 1120px;
     margin: 0 auto;
-    gap: 12px;
+    gap: 16px;
   }
-  @media (min-width: 640px) { .topbar { padding: 20px 32px; } }
+  @media (min-width: 640px) { .topbar { padding: 16px 32px; } }
   .logo {
     display: flex;
-    align-items: baseline;
-    gap: 8px;
-    font-family: var(--mono);
+    align-items: center;
+    gap: 10px;
+    font-family: var(--head);
     font-weight: 600;
-    font-size: 1rem;
+    font-size: 1.05rem;
     color: var(--ink);
+    text-decoration: none;
   }
-  .logo .dot { color: var(--accent); }
-  .topnav { display: flex; gap: 18px; font-size: 0.9rem; }
+  .logo img { width: 28px; height: 28px; border-radius: 6px; flex: none; }
+  .topnav { display: flex; align-items: center; gap: 22px; font-size: 0.9rem; }
   .topnav a { color: var(--ink-dim); white-space: nowrap; }
+  .topnav a[aria-current="page"] { color: var(--ink); font-weight: 600; }
+  .btn-install { background: var(--accent); color: var(--accent-ink); padding: 8px 16px; border-radius: 999px; font-weight: 600; font-size: 0.86rem; white-space: nowrap; text-decoration: none; }
+  .btn-install:hover { opacity: 0.88; text-decoration: none; }
+  .topnav a.btn-install, .menu-panel a.btn-install { color: var(--accent-ink); font-weight: 600; }
+  .nav-menu { display: none; position: relative; }
+  .nav-menu summary { cursor: pointer; list-style: none; font-family: var(--mono); font-size: 0.85rem; color: var(--ink-dim); padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; }
+  .nav-menu summary::-webkit-details-marker { display: none; }
+  .nav-menu[open] summary { color: var(--ink); }
+  .menu-panel { position: absolute; right: 0; top: calc(100% + 8px); background: var(--bg-raised); border: 1px solid var(--line); border-radius: 10px; padding: 10px; display: flex; flex-direction: column; gap: 4px; min-width: 190px; box-shadow: 0 10px 28px rgba(0,0,0,0.16); z-index: 50; }
+  .menu-panel a { padding: 9px 10px; border-radius: 6px; color: var(--ink-dim); font-size: 0.9rem; }
+  .menu-panel a:hover { background: var(--line); color: var(--ink); }
+  .menu-panel a[aria-current="page"] { color: var(--ink); font-weight: 600; }
+  .menu-panel .btn-install { margin-top: 4px; text-align: center; }
+  @media (max-width: 640px) {
+    .topnav { display: none; }
+    .nav-menu { display: block; }
+  }
 
   /* ---------- hero ---------- */
-  #hero { padding-top: 32px; padding-bottom: 56px; }
+  #hero { padding-top: 40px; padding-bottom: 0; }
+  .hero-grid { display: grid; grid-template-columns: 1fr; gap: 44px; align-items: start; }
+  @media (min-width: 960px) { .hero-grid { grid-template-columns: 1.05fr 1fr; gap: 56px; } }
+  .hero-grid > * { min-width: 0; }
+
   .eyebrow {
     font-family: var(--mono);
     font-size: 0.8rem;
@@ -127,14 +157,42 @@
     letter-spacing: 0.08em;
     margin: 0 0 14px;
   }
-  h1.title { font-size: clamp(2rem, 6vw, 3.2rem); line-height: 1.08; max-width: 18ch; }
-  .promise { font-size: clamp(1.05rem, 2.6vw, 1.25rem); color: var(--ink-dim); max-width: 46ch; margin: 18px 0 32px; }
+  h1.title { font-size: clamp(2.1rem, 5vw, 3.4rem); line-height: 1.06; max-width: 18ch; }
+  .promise { font-size: clamp(1.05rem, 2.2vw, 1.2rem); color: var(--ink-dim); max-width: 46ch; margin: 18px 0 30px; }
+
+  .hero-ctas { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 30px; }
+  .btn-primary { background: var(--accent); color: var(--accent-ink); padding: 13px 24px; border-radius: 999px; font-weight: 600; font-size: 0.96rem; text-decoration: none; display: inline-flex; align-items: center; }
+  .btn-primary:hover { opacity: 0.9; text-decoration: none; }
+  .btn-secondary { padding: 13px 24px; border-radius: 999px; font-weight: 600; font-size: 0.96rem; border: 1px solid var(--line-strong); color: var(--ink); text-decoration: none; display: inline-flex; align-items: center; }
+  .btn-secondary:hover { border-color: var(--ink-faint); text-decoration: none; }
+
+  .install-tabs-wrap { max-width: 560px; scroll-margin-top: 90px; }
+  .install-tabs-label { font-family: var(--mono); font-size: 0.76rem; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.06em; margin: 0 0 10px; }
+  .tab-btn {
+    display: inline-flex;
+    align-items: center;
+    padding: 8px 16px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    color: var(--ink-dim);
+    font-family: var(--mono);
+    font-size: 0.84rem;
+    cursor: pointer;
+    margin: 0 8px 10px 0;
+    user-select: none;
+  }
+  .tab-radio:checked + .tab-btn { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .tab-radio:focus-visible + .tab-btn { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .install-panel { display: none; }
+  #tab-brew:checked ~ #panel-brew,
+  #tab-curl:checked ~ #panel-curl,
+  #tab-source:checked ~ #panel-source { display: block; }
 
   .install-methods { display: flex; flex-direction: column; gap: 14px; max-width: 600px; }
-  .install-label { font-family: var(--mono); font-size: 0.76rem; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.06em; margin: 0 0 6px; }
   .install-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: stretch; max-width: 560px; }
   .install-cmd {
     flex: 1 1 320px;
+    min-width: 0;
     display: flex;
     align-items: center;
     background: var(--term-bg);
@@ -142,15 +200,14 @@
     border-radius: var(--radius);
     color: var(--term-ink);
     font-family: var(--mono);
-    font-size: 0.92rem;
+    font-size: 0.9rem;
     padding: 0 6px 0 16px;
     min-height: 48px;
-    overflow-x: auto;
-    white-space: nowrap;
+    overflow: hidden;
   }
   .install-cmd .prompt { color: var(--term-accent); margin-right: 10px; user-select: none; }
-  .install-cmd { overflow: hidden; }
   .install-cmd .cmd-text { flex: 1 1 auto; min-width: 0; overflow-x: auto; white-space: nowrap; padding: 13px 0; scrollbar-width: thin; }
+  .install-row { min-width: 0; }
   .install-cmd .copy-btn { flex: none; }
   .copy-btn {
     display: inline-flex;
@@ -171,6 +228,54 @@
   .copy-btn svg { width: 14px; height: 14px; flex: none; }
 
   .hero-note { margin-top: 14px; font-size: 0.88rem; color: var(--ink-faint); }
+  .beta-note { margin-top: 14px; font-size: 0.86rem; color: var(--ink-faint); }
+
+  .hero-demo { }
+  .term-story { height: 320px; display: flex; flex-direction: column; }
+  .term-story .term-body { flex: 1 1 auto; overflow: hidden; }
+  .ln { display: block; min-height: 1.6em; }
+  .ln.bad { color: var(--bad); }
+  .caret { display: none; width: 0.55em; height: 1em; background: var(--term-accent); margin-left: 2px; vertical-align: -0.15em; }
+  .caret.active { display: inline-block; }
+  @media (prefers-reduced-motion: no-preference) {
+    .caret.active { animation: caretblink 1s steps(1) infinite; }
+    @keyframes caretblink { 50% { opacity: 0; } }
+  }
+  .replay-btn {
+    margin-top: 12px;
+    background: none;
+    border: 0;
+    color: var(--ink-faint);
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    cursor: pointer;
+    padding: 6px 2px;
+    text-decoration: underline;
+    text-decoration-color: var(--line-strong);
+  }
+  .replay-btn:hover { color: var(--ink); }
+  .replay-btn[hidden] { display: none; }
+
+  .proof-strip {
+    list-style: none;
+    margin: 48px 0 0;
+    padding: 20px 0;
+    border-top: 1px solid var(--line);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 0;
+    font-size: 0.86rem;
+    color: var(--ink-dim);
+    font-family: var(--mono);
+  }
+  .proof-strip li { padding: 0 24px; border-right: 1px solid var(--line); }
+  .proof-strip li:first-child { padding-left: 0; }
+  .proof-strip li:last-child { border-right: none; padding-right: 0; }
+  @media (max-width: 560px) {
+    .proof-strip { flex-direction: column; gap: 10px; }
+    .proof-strip li { padding: 0 0 10px; border-right: none; border-bottom: 1px solid var(--line); }
+    .proof-strip li:last-child { border-bottom: none; padding-bottom: 0; }
+  }
 
   /* ---------- section heads ---------- */
   .kicker {
@@ -191,20 +296,7 @@
   .crash-table td:first-child { font-weight: 600; white-space: nowrap; width: 1%; }
   .crash-table tr:last-child td { border-bottom: none; }
   .crash-table { display: block; overflow-x: auto; }
-  .crash-table table-inner { }
   @media (min-width: 640px) { .crash-table { display: table; overflow-x: visible; } }
-
-  /* mobile fallback: stack as cards */
-  .crash-cards { display: flex; flex-direction: column; gap: 2px; }
-  .crash-card {
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
-    padding: 16px;
-    background: var(--bg-raised);
-  }
-  .crash-card + .crash-card { margin-top: 10px; }
-  .crash-card h3 { font-size: 1rem; margin-bottom: 6px; }
-  .crash-card p { margin: 0; color: var(--ink-dim); font-size: 0.94rem; }
 
   /* ---------- terminal transcripts ---------- */
   .term {
@@ -227,7 +319,7 @@
   .term-head .tdot { width: 9px; height: 9px; border-radius: 50%; background: var(--term-dim); opacity: 0.5; }
   .term-head .tname { margin-left: 6px; color: var(--term-dim); font-size: 0.78rem; }
   .term-body { padding: 16px; white-space: pre; }
-  .term-body .ln { display: block; color: var(--term-ink); }
+  .term-body .ln { color: var(--term-ink); }
   .term-body .p { color: var(--term-accent); }
   .term-body .out { color: var(--term-dim); }
   .term + .term { margin-top: 18px; }
@@ -314,68 +406,117 @@
 </head>
 <body>
 
+<header class="site-header">
 <div class="topbar">
-  <div class="logo">dpty<span class="dot">.</span></div>
-  <nav class="topnav" aria-label="Section links">
-    <a href="#crashes">Crashes</a>
-    <a href="#cli">CLI</a>
-    <a href="#agents">Agents</a>
-    <a href="#surfaces">Surfaces</a>
-    <a href="#architecture">Architecture</a>
-    <a href="#limits">Limits</a>
-    <a href="getting-started.html">Getting started</a>
-    <a href="cli.html">Full CLI</a>
-    <a href="agents.html">Agents docs</a>
-    <a href="mcp-and-api.html">MCP &amp; API</a>
+  <a class="logo" href="index.html"><img src="assets/logo-mark.svg" alt="" width="28" height="28">Durable PTY</a>
+  <nav class="topnav" aria-label="Primary">
+    <a href="getting-started.html">Docs</a>
+    <a href="cli.html">CLI</a>
     <a href="how-it-works.html">How it works</a>
+    <a href="https://github.com/jasonkneen/durable-pty">GitHub</a>
+    <a class="btn-install" href="#install">Install</a>
   </nav>
+  <details class="nav-menu">
+    <summary>Menu</summary>
+    <div class="menu-panel">
+      <a href="getting-started.html">Docs</a>
+      <a href="cli.html">CLI</a>
+      <a href="how-it-works.html">How it works</a>
+      <a href="https://github.com/jasonkneen/durable-pty">GitHub</a>
+      <a class="btn-install" href="#install">Install</a>
+    </div>
+  </details>
 </div>
+</header>
 
 <main>
 <section id="hero" class="wrap">
-  <p class="eyebrow">durable-pty</p>
-  <h1 class="title">PTY sessions that outlive your app.</h1>
-  <p class="promise">dpty runs a daemon that owns your terminal sessions and writes everything — scrollback, typed commands, events — to SQLite, so a crash in your app, or even the daemon, never takes a running shell or agent with it.</p>
+  <div class="hero-grid">
+    <div class="hero-copy">
+      <p class="eyebrow">Durable PTY</p>
+      <h1 class="title">Terminals that don't die with your app.</h1>
+      <p class="promise">Durable PTY keeps shells and AI coding agents running through app crashes and daemon restarts, and brings them back after a reboot.</p>
 
-  <div class="install-methods" role="group" aria-label="Install methods">
-    <div class="install-method">
-      <p class="install-label">Homebrew</p>
-      <div class="install-row">
-        <div class="install-cmd" data-copy-text="brew install jasonkneen/tap/dpty">
-          <span class="prompt">$</span><span class="cmd-text">brew install jasonkneen/tap/dpty</span>
-          <button class="copy-btn" type="button" aria-label="Copy Homebrew install command">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.6" fill="none"/><path d="M5 16V5a2 2 0 0 1 2-2h11" stroke="currentColor" stroke-width="1.6" fill="none"/></svg>
-            <span class="copy-label">Copy</span>
-          </button>
-        </div>
+      <div class="hero-ctas">
+        <a class="btn-primary" href="#install">Install</a>
+        <a class="btn-secondary" href="getting-started.html">Read the docs</a>
       </div>
+
+      <div class="install-tabs-wrap" id="install">
+        <p class="install-tabs-label">Install with</p>
+        <input type="radio" name="install-method" id="tab-brew" class="tab-radio sr-only" checked>
+        <label for="tab-brew" class="tab-btn">Homebrew</label>
+        <input type="radio" name="install-method" id="tab-curl" class="tab-radio sr-only">
+        <label for="tab-curl" class="tab-btn">curl</label>
+        <input type="radio" name="install-method" id="tab-source" class="tab-radio sr-only">
+        <label for="tab-source" class="tab-btn">Source</label>
+
+        <div class="install-panel" id="panel-brew">
+          <div class="install-row">
+            <div class="install-cmd" data-copy-text="brew install jasonkneen/tap/dpty">
+              <span class="prompt">$</span><span class="cmd-text">brew install jasonkneen/tap/dpty</span>
+              <button class="copy-btn" type="button" aria-label="Copy Homebrew install command">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.6" fill="none"/><path d="M5 16V5a2 2 0 0 1 2-2h11" stroke="currentColor" stroke-width="1.6" fill="none"/></svg>
+                <span class="copy-label">Copy</span>
+              </button>
+            </div>
+          </div>
+        </div>
+        <div class="install-panel" id="panel-curl">
+          <div class="install-row">
+            <div class="install-cmd" data-copy-text="curl -fsSL https://raw.githubusercontent.com/jasonkneen/durable-pty/main/install.sh | sh">
+              <span class="prompt">$</span><span class="cmd-text">curl -fsSL https://raw.githubusercontent.com/jasonkneen/durable-pty/main/install.sh | sh</span>
+              <button class="copy-btn" type="button" aria-label="Copy curl install command">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.6" fill="none"/><path d="M5 16V5a2 2 0 0 1 2-2h11" stroke="currentColor" stroke-width="1.6" fill="none"/></svg>
+                <span class="copy-label">Copy</span>
+              </button>
+            </div>
+          </div>
+        </div>
+        <div class="install-panel" id="panel-source">
+          <div class="install-row">
+            <div class="install-cmd" data-copy-text="cargo install --path .">
+              <span class="prompt">$</span><span class="cmd-text">cargo install --path .</span>
+              <button class="copy-btn" type="button" aria-label="Copy cargo install command">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.6" fill="none"/><path d="M5 16V5a2 2 0 0 1 2-2h11" stroke="currentColor" stroke-width="1.6" fill="none"/></svg>
+                <span class="copy-label">Copy</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <p class="beta-note">Private beta: installers need access to the repository until the first public release.</p>
+      </div>
+
+      <p class="hero-note">Then run <code class="inline">dpty install</code> to start it at login. macOS (Apple silicon and Intel) and Linux (x86_64, aarch64). MIT licensed. <a href="getting-started.html">Full install guide →</a></p>
     </div>
-    <div class="install-method">
-      <p class="install-label">curl</p>
-      <div class="install-row">
-        <div class="install-cmd" data-copy-text="curl -fsSL https://raw.githubusercontent.com/jasonkneen/durable-pty/main/install.sh | sh">
-          <span class="prompt">$</span><span class="cmd-text">curl -fsSL https://raw.githubusercontent.com/jasonkneen/durable-pty/main/install.sh | sh</span>
-          <button class="copy-btn" type="button" aria-label="Copy curl install command">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.6" fill="none"/><path d="M5 16V5a2 2 0 0 1 2-2h11" stroke="currentColor" stroke-width="1.6" fill="none"/></svg>
-            <span class="copy-label">Copy</span>
-          </button>
+
+    <div class="hero-demo">
+      <div class="term term-story" id="story" role="group" aria-label="Demo: an agent session surviving a daemon restart and a machine reboot" tabindex="0">
+        <div class="term-head"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span><span class="tname">zsh — work</span></div>
+        <div class="term-body" id="story-body">
+          <span class="ln"><span class="p">$</span> <span class="story-text">dpty new -n work -- claude "fix the flaky test"</span><span class="caret" aria-hidden="true"></span></span>
+          <span class="ln out"><span class="story-text">attached to work (pid 48213) — claude is thinking…</span></span>
+          <span class="ln bad"><span class="story-text">daemon killed (kill -9)</span></span>
+          <span class="ln"><span class="p">$</span> <span class="story-text">dpty ls</span><span class="caret" aria-hidden="true"></span></span>
+          <span class="ln out"><span class="story-text">work   claude   running   pid 48213</span></span>
+          <span class="ln bad"><span class="story-text">machine rebooted</span></span>
+          <span class="ln"><span class="p">$</span> <span class="story-text">dpty ls</span><span class="caret" aria-hidden="true"></span></span>
+          <span class="ln out"><span class="story-text">work   claude   lost</span></span>
+          <span class="ln out"><span class="story-text">[durable-pty] resuming: claude --resume 0186495c-9e2a-7c3e-8b1f-2a6e5c9d7f41</span></span>
+          <span class="ln out"><span class="story-text">claude: picking up where I left off…</span></span>
         </div>
       </div>
-    </div>
-    <div class="install-method">
-      <p class="install-label">From source</p>
-      <div class="install-row">
-        <div class="install-cmd" data-copy-text="cargo install --path .">
-          <span class="prompt">$</span><span class="cmd-text">cargo install --path .</span>
-          <button class="copy-btn" type="button" aria-label="Copy cargo install command">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.6" fill="none"/><path d="M5 16V5a2 2 0 0 1 2-2h11" stroke="currentColor" stroke-width="1.6" fill="none"/></svg>
-            <span class="copy-label">Copy</span>
-          </button>
-        </div>
-      </div>
+      <button type="button" class="replay-btn" id="story-replay">Replay</button>
     </div>
   </div>
-  <p class="hero-note">Then run <code class="inline">dpty install</code> to start it at login. macOS (Apple silicon and Intel) and Linux (x86_64, aarch64). MIT licensed. <a href="getting-started.html">Full install guide →</a></p>
+
+  <ul class="proof-strip">
+    <li>One binary: daemon, CLI and MCP server</li>
+    <li>Tested against the real claude and codex CLIs</li>
+    <li>Every session in its own helper process</li>
+    <li>macOS and Linux</li>
+  </ul>
 </section>
 
 <section id="crashes" class="wrap">
@@ -573,9 +714,8 @@
     <a href="https://github.com/jasonkneen/durable-pty/blob/main/LICENSE">LICENSE (MIT)</a>
     <a href="https://github.com/jasonkneen/durable-pty/blob/main/CONTRIBUTING.md">Contributing</a>
   </div>
-  <p class="footer-fine">durable-pty is MIT licensed. Written by Jason Kneen.</p>
+  <p class="footer-fine">Durable PTY is MIT licensed. Written by Jason Kneen.</p>
 </footer>
-</main>
 
 <script>
 (function () {
@@ -620,6 +760,103 @@
       }
     });
   });
+
+  // ---- hero terminal story: typed demo of a crash + reboot + resume ----
+  function initStory() {
+    var story = document.getElementById("story");
+    if (!story) { return; }
+    var replayBtn = document.getElementById("story-replay");
+    var reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    if (reduceMotion) {
+      // Leave the final state exactly as rendered in HTML; nothing to replay.
+      if (replayBtn) { replayBtn.hidden = true; }
+      return;
+    }
+
+    var lineEls = Array.prototype.slice.call(story.querySelectorAll(".story-text"));
+    var fulls = lineEls.map(function (el) { return el.textContent; });
+    var paused = false;
+    var timer = null;
+    var running = false;
+
+    function setPaused(v) { paused = v; }
+    story.addEventListener("mouseenter", function () { setPaused(true); });
+    story.addEventListener("mouseleave", function () { setPaused(false); });
+    story.addEventListener("focusin", function () { setPaused(true); });
+    story.addEventListener("focusout", function () { setPaused(false); });
+
+    function clearAll() {
+      lineEls.forEach(function (el) { el.textContent = ""; });
+      story.querySelectorAll(".caret").forEach(function (c) { c.classList.remove("active"); });
+    }
+
+    function whenReady(cb) {
+      if (paused) { timer = setTimeout(function () { whenReady(cb); }, 200); }
+      else { cb(); }
+    }
+
+    function typeLine(i, done) {
+      var el = lineEls[i];
+      var full = fulls[i];
+      var lnEl = el.closest(".ln");
+      var isCommand = !!(lnEl && lnEl.querySelector(".p"));
+      var caret = el.nextElementSibling && el.nextElementSibling.classList && el.nextElementSibling.classList.contains("caret")
+        ? el.nextElementSibling
+        : null;
+
+      if (!isCommand) {
+        whenReady(function () {
+          el.textContent = full;
+          timer = setTimeout(done, 650);
+        });
+        return;
+      }
+
+      if (caret) { caret.classList.add("active"); }
+      var pos = 0;
+      function step() {
+        whenReady(function () {
+          pos += 1;
+          el.textContent = full.slice(0, pos);
+          if (pos < full.length) {
+            timer = setTimeout(step, 28);
+          } else {
+            if (caret) { caret.classList.remove("active"); }
+            timer = setTimeout(done, 420);
+          }
+        });
+      }
+      step();
+    }
+
+    function run() {
+      if (running) { return; }
+      running = true;
+      clearAll();
+      var i = 0;
+      function next() {
+        if (i >= lineEls.length) {
+          timer = setTimeout(function () { running = false; run(); }, 2400);
+          return;
+        }
+        typeLine(i, function () { i += 1; next(); });
+      }
+      next();
+    }
+
+    if (replayBtn) {
+      replayBtn.addEventListener("click", function () {
+        if (timer) { clearTimeout(timer); }
+        running = false;
+        run();
+      });
+    }
+
+    run();
+  }
+
+  initStory();
 })();
 </script>
 </body>

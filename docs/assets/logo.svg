@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 128" role="img" aria-label="Durable PTY">
+  <title>Durable PTY</title>
+  <g transform="translate(0,0)">
+    <rect x="6" y="6" width="116" height="116" rx="28" fill="#0d1117"/>
+    <rect x="6" y="6" width="116" height="116" rx="28" fill="none" stroke="#2f3b4a" stroke-width="3"/>
+    <path d="M34 40 L62 64 L34 88" fill="none" stroke="#5eead4" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="70" y="80" width="26" height="12" rx="3" fill="#e6edf3"/>
+    <path d="M104 44 A42 42 0 0 0 40 24" fill="none" stroke="#5eead4" stroke-width="4" stroke-linecap="round" opacity="0.55"/>
+  </g>
+  <text x="148" y="70" font-family="ui-sans-serif, 'Inter', 'Helvetica Neue', Arial, sans-serif" font-size="52" font-weight="700" fill="#0d1117" letter-spacing="-1">Durable PTY</text>
+  <text x="150" y="104" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="26" fill="#0f766e">dpty</text>
+</svg>

@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630">
+  <rect width="1200" height="630" fill="#0d1117"/>
+  <g transform="translate(90,150) scale(2.4)">
+    <rect x="6" y="6" width="116" height="116" rx="28" fill="#111a24"/>
+    <rect x="6" y="6" width="116" height="116" rx="28" fill="none" stroke="#2f3b4a" stroke-width="3"/>
+    <path d="M34 40 L62 64 L34 88" fill="none" stroke="#5eead4" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="70" y="80" width="26" height="12" rx="3" fill="#e6edf3"/>
+    <path d="M104 44 A42 42 0 0 0 40 24" fill="none" stroke="#5eead4" stroke-width="4" stroke-linecap="round" opacity="0.55"/>
+  </g>
+  <text x="430" y="270" font-family="Helvetica Neue, Arial, sans-serif" font-size="92" font-weight="700" fill="#e6edf3" letter-spacing="-2">Durable PTY</text>
+  <text x="432" y="340" font-family="Menlo, Consolas, monospace" font-size="44" fill="#5eead4">dpty</text>
+  <text x="432" y="430" font-family="Helvetica Neue, Arial, sans-serif" font-size="38" fill="#9aa7b4">Terminals that don't die with your app.</text>
+  <text x="432" y="486" font-family="Helvetica Neue, Arial, sans-serif" font-size="30" fill="#6b7886">Shells and AI agents that survive crashes,</text>
+  <text x="432" y="528" font-family="Helvetica Neue, Arial, sans-serif" font-size="30" fill="#6b7886">restarts and reboots.</text>
+</svg>

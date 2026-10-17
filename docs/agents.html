@@ -3,17 +3,22 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Agents — durable-pty</title>
+<title>Agents — Durable PTY</title>
 <meta name="description" content="How dpty resumes claude and codex sessions, restart policies, the tag-agent hook, and adding your own agent with --resume-cmd.">
 <meta name="theme-color" content="#0b0d10">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta property="og:image" content="https://jasonkneen.github.io/durable-pty/assets/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://jasonkneen.github.io/durable-pty/assets/og.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
 <style>
   :root {
     --bg: #f6f5f2; --bg-raised: #ffffff; --ink: #14161a; --ink-dim: #4b5058; --ink-faint: #767c86;
-    --line: #dcd9d2; --line-strong: #b9b4aa; --accent: #0a5c36; --accent-ink: #ffffff;
-    --term-bg: #121414; --term-ink: #e7e9e4; --term-dim: #8a9088; --term-accent: #6bc78f; --term-border: #262a28;
+    --line: #dcd9d2; --line-strong: #b9b4aa; --accent: #0f766e; --accent-ink: #ffffff;
+    --term-bg: #121414; --term-ink: #e7e9e4; --term-dim: #8a9088; --term-accent: #5eead4; --term-border: #262a28;
     --radius: 10px;
     --mono: "SFMono-Regular", "JetBrains Mono", ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
@@ -22,8 +27,8 @@
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #0b0d10; --bg-raised: #141719; --ink: #eef0ee; --ink-dim: #a9afb3; --ink-faint: #767e84;
-      --line: #262a2e; --line-strong: #363b40; --accent: #5fd392; --accent-ink: #0a140f;
-      --term-bg: #0a0b0a; --term-ink: #e7e9e4; --term-dim: #70766f; --term-accent: #5fd392; --term-border: #1c1f1d;
+      --line: #262a2e; --line-strong: #363b40; --accent: #5eead4; --accent-ink: #0a140f;
+      --term-bg: #0a0b0a; --term-ink: #e7e9e4; --term-dim: #70766f; --term-accent: #5eead4; --term-border: #1c1f1d;
     }
   }
   * { box-sizing: border-box; }
@@ -36,11 +41,33 @@
 
   .topbar { display: flex; align-items: center; justify-content: space-between; padding: 20px 16px; max-width: 1080px; margin: 0 auto; gap: 12px; flex-wrap: wrap; }
   @media (min-width: 640px) { .topbar { padding: 20px 32px; } }
-  .logo { display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); font-weight: 600; font-size: 1rem; }
+  .logo { display: flex; align-items: center; gap: 10px; font-family: var(--head); font-weight: 600; font-size: 1.02rem; color: var(--ink); text-decoration: none; }
+  .logo img { width: 28px; height: 28px; border-radius: 6px; flex: none; }
   .logo .dot { color: var(--accent); }
   .topnav { display: flex; gap: 16px; font-size: 0.88rem; flex-wrap: wrap; }
   .topnav a { color: var(--ink-dim); white-space: nowrap; }
   .topnav a[aria-current="page"] { color: var(--ink); font-weight: 600; }
+
+  .site-header { position: sticky; top: 0; z-index: 40; background: var(--bg); border-bottom: 1px solid var(--line); }
+  .topnav { gap: 22px; align-items: center; }
+  .btn-install { background: var(--accent); color: var(--accent-ink); padding: 8px 16px; border-radius: 999px; font-weight: 600; font-size: 0.86rem; white-space: nowrap; text-decoration: none; }
+  .btn-install:hover { opacity: 0.88; text-decoration: none; }
+  .topnav a.btn-install, .menu-panel a.btn-install { color: var(--accent-ink); font-weight: 600; }
+  .nav-menu { display: none; position: relative; }
+  .nav-menu summary { cursor: pointer; list-style: none; font-family: var(--mono); font-size: 0.85rem; color: var(--ink-dim); padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; }
+  .nav-menu summary::-webkit-details-marker { display: none; }
+  .nav-menu[open] summary { color: var(--ink); }
+  .menu-panel { position: absolute; right: 0; top: calc(100% + 8px); background: var(--bg-raised); border: 1px solid var(--line); border-radius: 10px; padding: 10px; display: flex; flex-direction: column; gap: 4px; min-width: 190px; box-shadow: 0 10px 28px rgba(0,0,0,0.16); z-index: 50; }
+  .menu-panel a { padding: 9px 10px; border-radius: 6px; color: var(--ink-dim); font-size: 0.9rem; }
+  .menu-panel a:hover { background: var(--line); color: var(--ink); }
+  .menu-panel a[aria-current="page"] { color: var(--ink); font-weight: 600; }
+  .menu-panel .btn-install { margin-top: 4px; text-align: center; }
+  @media (max-width: 640px) {
+    .topnav { display: none; }
+    .nav-menu { display: block; }
+  }
+  .side-label { font-family: var(--mono); font-size: 0.72rem; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.08em; margin: 0 0 10px; }
+  .side-label.spaced { margin-top: 22px; }
 
   .doc-wrap { max-width: 1080px; margin: 0 auto; padding: 0 16px 72px; }
   @media (min-width: 640px) { .doc-wrap { padding: 0 32px 80px; } }
@@ -79,17 +106,28 @@
 </head>
 <body>
 
+<header class="site-header">
 <div class="topbar">
-  <a class="logo" href="index.html">dpty<span class="dot">.</span></a>
-  <nav class="topnav" aria-label="Site">
-    <a href="index.html">Home</a>
-    <a href="getting-started.html">Getting started</a>
+  <a class="logo" href="index.html"><img src="assets/logo-mark.svg" alt="" width="28" height="28">Durable PTY</a>
+  <nav class="topnav" aria-label="Primary">
+    <a href="getting-started.html" aria-current="page">Docs</a>
     <a href="cli.html">CLI</a>
-    <a href="agents.html" aria-current="page">Agents</a>
-    <a href="mcp-and-api.html">MCP &amp; API</a>
     <a href="how-it-works.html">How it works</a>
+    <a href="https://github.com/jasonkneen/durable-pty">GitHub</a>
+    <a class="btn-install" href="getting-started.html#install">Install</a>
   </nav>
+  <details class="nav-menu">
+    <summary>Menu</summary>
+    <div class="menu-panel">
+      <a href="getting-started.html" aria-current="page">Docs</a>
+      <a href="cli.html">CLI</a>
+      <a href="how-it-works.html">How it works</a>
+      <a href="https://github.com/jasonkneen/durable-pty">GitHub</a>
+      <a class="btn-install" href="getting-started.html#install">Install</a>
+    </div>
+  </details>
 </div>
+</header>
 
 <main class="doc-wrap">
   <div class="doc-head">
@@ -99,7 +137,16 @@
   </div>
 
   <details class="doc-toc">
-    <summary>In this reference</summary>
+    <summary>In this guide</summary>
+    <p class="side-label">Guide</p>
+    <ul>
+      <li><a href="getting-started.html">Getting started</a></li>
+      <li><a href="cli.html">CLI reference</a></li>
+      <li><a href="agents.html" aria-current="page">Agents</a></li>
+      <li><a href="mcp-and-api.html">MCP &amp; API</a></li>
+      <li><a href="how-it-works.html">How it works</a></li>
+    </ul>
+    <p class="side-label spaced">On this page</p>
     <ul>
       <li><a href="#resume">How resume works</a></li>
       <li><a href="#claude-codex">claude and codex</a></li>
@@ -111,7 +158,18 @@
 
   <div class="doc-page">
     <aside class="doc-side">
+      <nav aria-label="Guide pages">
+        <p class="side-label">Guide</p>
+        <ul>
+          <li><a href="getting-started.html">Getting started</a></li>
+          <li><a href="cli.html">CLI reference</a></li>
+          <li><a href="agents.html" aria-current="page">Agents</a></li>
+          <li><a href="mcp-and-api.html">MCP &amp; API</a></li>
+          <li><a href="how-it-works.html">How it works</a></li>
+        </ul>
+      </nav>
       <nav aria-label="Sections">
+        <p class="side-label spaced">On this page</p>
         <ul>
           <li><a href="#resume">How resume works</a></li>
           <li><a href="#claude-codex">claude and codex</a></li>
