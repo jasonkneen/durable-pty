@@ -77,7 +77,7 @@ start_daemon 3
 check "next daemon picks them up again" '[ "$(pid_of ticker)" = "$P_TICK" ]'
 
 echo "# after a reboot (processes gone) agents resume, shells come back where they were"
-pkill -9 -f "dpty shim $DPTY_HOME" ; kill -9 $DAEMON; wait $DAEMON 2>/dev/null
+kill -9 $DAEMON; wait $DAEMON 2>/dev/null; pkill -9 -f "dpty shim $DPTY_HOME"
 sleep 1.5
 check "processes ended with their terminals" '! kill -0 $P_TICK 2>/dev/null'
 start_daemon 4
@@ -109,6 +109,14 @@ check "health is open" 'curl -sf "$HTTP/health" | grep -q ok'
 check "rpc needs token" '[ "$(curl -s -o /dev/null -w %{http_code} -X POST "$HTTP/rpc" -d "{}")" = 401 ]'
 check "rpc list" 'curl -sf -H "Authorization: Bearer $TOKEN" -H "content-type: application/json" -X POST "$HTTP/rpc" -d "{\"id\":1,\"method\":\"list\"}" | grep -q echoer'
 check "mcp over http" 'curl -sf -H "Authorization: Bearer $TOKEN" -H "content-type: application/json" -X POST "$HTTP/mcp" -d "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/list\"}" | grep -q pty_list'
+
+echo "# a helper that vanishes under a live daemon is reported as lost"
+"$BIN" new -d -n vanish -- sh -c 'sleep 300' >/dev/null
+sleep 0.6
+VID=$("$BIN" ls --json | python3 -c "import sys,json;print([s for s in json.load(sys.stdin) if s['name']=='vanish'][0]['id'])")
+pkill -9 -f "dpty shim $DPTY_HOME/shims/$VID"
+sleep 1.2
+check "status is lost, not a made-up exit code" '"$BIN" ls | grep vanish | grep -q lost'
 
 echo "# stop --sessions ends everything"
 "$BIN" stop --sessions >/dev/null; sleep 1

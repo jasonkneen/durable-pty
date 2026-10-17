@@ -78,7 +78,7 @@ if wait_for "$SUM2" 150; then ok "the live process kept working through the cras
 sleep 3
 
 echo "# simulate a reboot: kill the helper processes (and with them the agent)"
-pkill -9 -f "dpty shim $DPTY_HOME"; kill -9 $DAEMON; wait $DAEMON 2>/dev/null; sleep 2
+kill -9 $DAEMON; wait $DAEMON 2>/dev/null; pkill -9 -f "dpty shim $DPTY_HOME"; sleep 2
 kill -0 "$P1" 2>/dev/null && bad "agent still alive after the simulated reboot" || ok "agent process is gone"
 start_daemon 3
 echo "  waiting for dpty to relaunch it with its resume command..."

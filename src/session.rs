@@ -34,6 +34,8 @@ struct ExitMsg {
     id: String,
     epoch: u64,
     code: i32,
+    /// The helper process vanished without reporting how the program ended: the program is gone, its outcome unknown.
+    lost: bool,
 }
 
 pub struct Screen {
@@ -581,14 +583,14 @@ impl Manager {
                     shim::S_ECHO if !p.is_empty() => l.echo.store(p[0] != 0, Ordering::SeqCst),
                     shim::S_EXIT if p.len() == 4 => {
                         exited = true;
-                        let _ = exit_tx.send(ExitMsg { id: l.id.clone(), epoch, code: i32::from_be_bytes(p[..4].try_into().unwrap()) });
+                        let _ = exit_tx.send(ExitMsg { id: l.id.clone(), epoch, code: i32::from_be_bytes(p[..4].try_into().unwrap()), lost: false });
                     }
                     _ => {}
                 }
             }
             // The connection ended without the process reporting an exit: the helper itself is gone.
             if !exited && !me.shutting_down.load(Ordering::SeqCst) {
-                let _ = exit_tx.send(ExitMsg { id: l.id.clone(), epoch, code: -1 });
+                let _ = exit_tx.send(ExitMsg { id: l.id.clone(), epoch, code: -1, lost: true });
             }
         });
         Ok(())
@@ -652,7 +654,7 @@ impl Manager {
                 if want {
                     self.db.add_event(Some(&m.id), "restart-loop", "gave up after 5 restarts in 60s");
                 }
-                self.finalize(&live, m.code);
+                self.finalize(&live, m.code, m.lost);
             }
         }
     }
@@ -670,16 +672,20 @@ impl Manager {
         if let Err(e) = self.start_proc(live).await {
             live.emit(format!("\r\n[durable-pty: restart failed: {e}]\r\n").as_bytes());
             self.db.add_event(Some(&live.id), "restart-failed", &e.to_string());
-            self.finalize(live, -1);
+            self.finalize(live, -1, false);
         }
     }
 
-    fn finalize(&self, live: &Arc<Live>, code: i32) {
-        live.emit(format!("\r\n\x1b[38;5;244m[process exited with code {code}]\x1b[0m\r\n").as_bytes());
+    fn finalize(&self, live: &Arc<Live>, code: i32, lost: bool) {
+        if lost {
+            live.emit(b"\r\n\x1b[38;5;244m[the session's helper process disappeared: the program is gone]\x1b[0m\r\n");
+        } else {
+            live.emit(format!("\r\n\x1b[38;5;244m[process exited with code {code}]\x1b[0m\r\n").as_bytes());
+        }
         {
             let mut m = lock(&live.meta);
-            m.status = "exited".into();
-            m.exit_code = Some(code);
+            m.status = if lost { "lost".into() } else { "exited".into() };
+            m.exit_code = if lost { None } else { Some(code) };
             m.ended_ms = Some(now_ms());
             m.pid = None;
             let _ = self.db.upsert_session(&m);
@@ -690,7 +696,7 @@ impl Manager {
         }
         let _ = live.tx.send(Frame::Exit(code));
         lock(&self.live).remove(&live.id);
-        self.db.add_event(Some(&live.id), "exited", &code.to_string());
+        self.db.add_event(Some(&live.id), if lost { "lost" } else { "exited" }, &if lost { "helper process disappeared".to_string() } else { code.to_string() });
     }
 
     pub fn kill(&self, key: &str, signal: Option<&str>) -> Result<()> {
