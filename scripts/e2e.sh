@@ -8,7 +8,7 @@ FAKE="$DPTY_HOME/bin"; mkdir -p "$FAKE"
 export PATH="$FAKE:$PATH"
 fail=0
 ok()  { echo "  ok   $1"; }
-bad() { echo "  FAIL $1"; fail=1; }
+bad() { echo "  FAIL $1"; fail=1; { echo "  --- dpty ls"; "$BIN" ls; echo "  --- events"; "$BIN" events -n 25; } 2>&1 | sed "s/^/      /"; }
 check() { if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 pid_of() { "$BIN" ls --json | python3 -c "import sys,json;print([s for s in json.load(sys.stdin) if s['name']=='$1'][0]['pid'] or '')"; }
 start_daemon() { "$BIN" serve --http 127.0.0.1:0 >"$DPTY_HOME/daemon.$1.out" 2>&1 & DAEMON=$!; for _ in $(seq 60); do "$BIN" status >/dev/null 2>&1 && break; sleep 0.1; done; }
