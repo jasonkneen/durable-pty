@@ -758,7 +758,8 @@ impl Manager {
                 let from = lock(&live.screen).offset;
                 match self.attach_shim(&live, from).await {
                     Ok(()) => {
-                        live.emit(b"\r\n\x1b[2m[durable-pty: daemon restarted, this session kept running]\x1b[0m\r\n");
+                        // No banner here: the program may be a full-screen TUI, and text written into its screen would
+                        // sit inside its layout until it redraws. The event log records the reattach.
                         self.db.add_event(Some(&row.id), "reattached", "daemon restarted, process kept running");
                         continue;
                     }

@@ -68,11 +68,23 @@ esac
 P1="$(pid_of)"
 
 echo "# crash the daemon: the SAME live $AGENT process must still be there"
+# Let the agent finish whatever it is doing, so "before" and "after" are comparable.
+prev=""; for _ in $(seq 40); do cur="$(screen | sed 's/ *$//' | grep -v -E '[0-9]+(\.[0-9])?s|[0-9]+m[0-9]+s|Thinking|Working' )"; [ "$cur" = "$prev" ] && break; prev="$cur"; sleep 3; done
+screen > "$DPTY_HOME/screen.before"
 kill -9 $DAEMON; wait $DAEMON 2>/dev/null; sleep 2
 kill -0 "$P1" 2>/dev/null && ok "$AGENT process $P1 survived the daemon" || bad "process died with the daemon"
 start_daemon 2; sleep 1.5
 [ "$(pid_of)" = "$P1" ] && ok "daemon reattached to the same pid" || bad "pid changed"
-screen | grep -q "$SUM" && ok "the conversation is still on the screen" || bad "screen lost the conversation"
+# Some TUIs scroll finished messages out of view, so compare what was on screen before the crash with what is there now.
+screen > "$DPTY_HOME/screen.after"
+SAME="$(python3 - "$DPTY_HOME/screen.before" "$DPTY_HOME/screen.after" <<'PY'
+import sys
+a=[l.rstrip() for l in open(sys.argv[1]) if l.strip()]
+b={l.rstrip() for l in open(sys.argv[2]) if l.strip()}
+print("yes" if a and sum(1 for l in a if l in b)/len(a) >= 0.8 else "no")
+PY
+)"
+[ "$SAME" = yes ] && ok "the screen after the crash matches the screen before it" || bad "the screen changed across the daemon crash"
 ask "What is $C plus $D? Reply with just the number."
 if wait_for "$SUM2" 150; then ok "the live process kept working through the crash ($C + $D = $SUM2)"; else bad "live process did not answer after the crash"; fi
 sleep 3
