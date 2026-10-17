@@ -6,6 +6,7 @@ versions follow [Semantic Versioning](https://semver.org/). Notes under "Unrelea
 
 ## Unreleased
 
+- Fix: `scripts/release.sh` now really bumps the version in `Cargo.toml` and refuses to continue if the built binary does not report it. The 0.1.1 binaries were built from an unbumped tree and report 0.1.0; 0.1.2 is the first release whose version matches its tag.
 ## 0.1.1 (2026-10-17)
 
 - Homebrew: the formula installs the prebuilt binary (no Rust needed); the release workflow updates the tap with a deploy key.

@@ -32,8 +32,11 @@ if [ $dry = 1 ]; then echo "dry run: stopping here"; exit 0; fi
 cargo test --locked
 ./scripts/e2e.sh
 
-sed -i.bak -E "0,/^version = \".*\"/s//version = \"$version\"/" Cargo.toml && rm -f Cargo.toml.bak
+# Portable across macOS and GNU sed: rewrite only the first `version = "..."` line, then check it really changed.
+perl -0pi -e "s/^version = \"[^\"]*\"/version = \"$version\"/m" Cargo.toml
+[ "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" = "$version" ] || { echo "could not set the version in Cargo.toml" >&2; exit 1; }
 cargo build --release >/dev/null            # refreshes Cargo.lock
+[ "$(./target/release/dpty --version)" = "dpty $version" ] || { echo "the built binary does not report $version" >&2; exit 1; }
 today="$(date +%Y-%m-%d)"
 sed -i.bak "s/^## Unreleased/## Unreleased\n\n## $version ($today)/" CHANGELOG.md && rm -f CHANGELOG.md.bak
 git add Cargo.toml Cargo.lock CHANGELOG.md
