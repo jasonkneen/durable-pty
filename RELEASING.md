@@ -34,8 +34,11 @@ If the daemon runs under launchd (`dpty install`), `dpty stop` is enough: launch
 ## Homebrew
 
 The tap is `jasonkneen/homebrew-tap` (`brew install jasonkneen/tap/dpty`). The release workflow's `homebrew` job writes the
-formula with `scripts/gen-formula.sh` and pushes it, using a repository secret `TAP_GITHUB_TOKEN` (a fine-grained token with
-Contents: write on the tap repository; add it under Settings, Secrets and variables, Actions). Without the secret the job does
+formula with `scripts/gen-formula.sh` and pushes it over ssh with a deploy key: the private half is the repository secret
+`TAP_DEPLOY_KEY`, the public half is a read-write deploy key on the tap repository, so the credential can write to the tap and
+nothing else. To rotate it: `ssh-keygen -t ed25519 -N "" -f key`, `gh repo deploy-key add key.pub -R jasonkneen/homebrew-tap
+--allow-write --title "durable-pty release workflow"`, `gh secret set TAP_DEPLOY_KEY -R jasonkneen/durable-pty < key`, then delete
+the key files and the old deploy key. Without the secret the job does
 nothing and you update the tap by hand:
 
 ```
