@@ -45,4 +45,4 @@ if [ $yes = 0 ]; then
   [[ "$ans" =~ ^[Yy]$ ]] || { echo "not pushed. To undo: git tag -d $tag && git reset --hard HEAD~1"; exit 0; }
 fi
 git push origin main "$tag"
-echo "pushed. Watch the build: gh run watch -R \"$(git remote get-url origin | sed -E 's#.*github.com[:/](.*)\\.git#\\1#')\""
+echo "pushed. Watch the build: gh run watch -R $(git remote get-url origin | sed -E 's#^.*github.com[:/]##; s#\.git$##')"
