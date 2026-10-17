@@ -64,10 +64,9 @@ or `cargo uninstall durable-pty`). Your data stays in `~/.durable-pty` until you
 
 ### Releasing (maintainers)
 
-Push a tag such as `v0.1.0`: `.github/workflows/release.yml` builds macOS (arm64, x86_64) and Linux (x86_64, aarch64) binaries and
-publishes them with `.sha256` files. Then run `scripts/update-formula.sh v0.1.0` and copy `packaging/homebrew/dpty.rb` to
-`Formula/dpty.rb` in your `homebrew-tap` repository. The site in `docs/` is served by GitHub Pages (Settings, Pages, deploy from the
-`main` branch, `/docs` folder).
+`scripts/release.sh X.Y.Z` bumps the version, rolls `CHANGELOG.md`, tests, tags and pushes; the tag builds the binaries, publishes
+them and updates the Homebrew tap. See [RELEASING.md](RELEASING.md). While the repository is private, the curl installer uses the
+GitHub CLI (`gh auth login`) to download releases, and the Homebrew formula builds from the tagged source.
 
 ## License and contributing
 

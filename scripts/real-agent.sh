@@ -39,7 +39,7 @@ ask() { "$BIN" send "$AGENT-run" "$1"; }  # types, pauses, then presses Enter on
 start_daemon 1
 echo "# $AGENT: start the real CLI under dpty (cwd $WORK)"
 "$BIN" new -d -n "$AGENT-run" -C "$WORK" -- "$AGENT" "${EXTRA[@]}" >/dev/null || { bad "could not start $AGENT"; exit 1; }
-if wait_for "(Try|›|> |\\?.*shortcuts|ctrl\\+|esc to|Context|Welcome)" 90; then ok "$AGENT interface is up"; else bad "$AGENT interface did not come up"; exit 1; fi
+if wait_for "(Try|›|❯|> |\\?.*shortcuts|ctrl\\+|Ctrl\\+|esc to|Context|Welcome|Shift\\+Tab)" 90; then ok "$AGENT interface is up"; else bad "$AGENT interface did not come up"; exit 1; fi
 sleep 2
 
 A=$((RANDOM % 900 + 100)); B=$((RANDOM % 900 + 100)); SUM=$((A + B))

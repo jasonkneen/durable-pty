@@ -1,6 +1,6 @@
 # Contributing to durable-pty
 
-Thanks for helping. This is a small Rust crate (one binary, `dpty`), so the bar for a change is: it works, it is tested, and it stays simple.
+Thanks for helping. Release steps are in [RELEASING.md](RELEASING.md). This is a small Rust crate (one binary, `dpty`), so the bar for a change is: it works, it is tested, and it stays simple.
 
 ## Set up
 
