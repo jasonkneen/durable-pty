@@ -6,6 +6,8 @@ versions follow [Semantic Versioning](https://semver.org/). Notes under "Unrelea
 
 ## Unreleased
 
+## 0.1.1 (2026-10-17)
+
 - Homebrew: the formula installs the prebuilt binary (no Rust needed); the release workflow updates the tap with a deploy key.
 - A session reattached after a daemon restart no longer gets a banner written into its screen (a full-screen program would have shown it inside its layout); the event log records the reattach.
 - `scripts/real-agent.sh` drives the real claude, codex and grok CLIs through a daemon crash and a simulated reboot.
