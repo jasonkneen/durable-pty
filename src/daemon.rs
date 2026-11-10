@@ -56,7 +56,7 @@ pub async fn serve(http_addr: Option<String>) -> Result<()> {
             _ = hup.recv() => {}
         }
     }
-    mgr.shutdown(false);
+    mgr.shutdown(false, None);
     let _ = std::fs::remove_file(paths::sock());
     drop(lock);
     eprintln!("durable-pty: stopped; sessions are recorded and will be restored on next start");

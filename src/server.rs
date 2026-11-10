@@ -19,6 +19,7 @@ pub async fn run_unix(mgr: Arc<Manager>, listener: UnixListener) {
 }
 
 async fn handle(mgr: Arc<Manager>, stream: UnixStream) {
+    let caller = stream.peer_cred().ok().and_then(|c| c.pid()).and_then(|p| u32::try_from(p).ok());
     let (r, mut w) = stream.into_split();
     let mut reader = BufReader::new(r);
     let mut line = String::new();
@@ -36,10 +37,10 @@ async fn handle(mgr: Arc<Manager>, stream: UnixStream) {
             }
         };
         if req.method == "attach" {
-            attach(mgr, reader, w, req).await;
+            attach(mgr, reader, w, req, caller).await;
             return;
         }
-        let resp = Response::from(req.id, rpc::dispatch(&mgr, &req.method, req.params).await);
+        let resp = Response::from(req.id, rpc::dispatch_from(&mgr, caller, &req.method, req.params).await);
         if write_resp(&mut w, resp).await.is_err() {
             return;
         }
@@ -52,8 +53,14 @@ async fn write_resp(w: &mut tokio::net::unix::OwnedWriteHalf, r: Response) -> st
     w.write_all(&b).await
 }
 
-async fn attach(mgr: Arc<Manager>, mut reader: BufReader<tokio::net::unix::OwnedReadHalf>, mut w: tokio::net::unix::OwnedWriteHalf, req: Request) {
+async fn attach(mgr: Arc<Manager>, mut reader: BufReader<tokio::net::unix::OwnedReadHalf>, mut w: tokio::net::unix::OwnedWriteHalf, req: Request, caller: Option<u32>) {
     let key = req.params.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    // Attaching to the session you are in shows the session its own output, which it then prints again, without end.
+    let own = caller.and_then(|pid| mgr.session_of_pid(pid));
+    if own.is_some() && mgr.resolve(&key).ok() == own {
+        let _ = write_resp(&mut w, Response::from(req.id, Err(rpc::OWN_SESSION.into()))).await;
+        return;
+    }
     let cols = req.params.get("cols").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
     let rows = req.params.get("rows").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
     let history = req.params.get("history").and_then(|v| v.as_bool()).unwrap_or(false);

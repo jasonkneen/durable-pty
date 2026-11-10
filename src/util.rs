@@ -169,6 +169,44 @@ pub fn process_cwd(pid: u32) -> Option<String> {
     }
 }
 
+/// The parent of a process, when it can be found.
+pub fn parent_pid(pid: u32) -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        // "pid (comm) state ppid ..."; comm may contain spaces and brackets, so read after the last ')'.
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let n = unsafe { libc::proc_pidinfo(pid as libc::c_int, libc::PROC_PIDTBSDINFO, 0, &mut info as *mut _ as *mut libc::c_void, size) };
+        (n == size).then_some(info.pbi_ppid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// A process and its ancestors, nearest first.
+pub fn ancestry(pid: u32) -> Vec<u32> {
+    let mut chain = vec![pid];
+    let mut cur = pid;
+    while chain.len() < 64 {
+        match parent_pid(cur) {
+            Some(p) if p > 1 && !chain.contains(&p) => {
+                chain.push(p);
+                cur = p;
+            }
+            _ => break,
+        }
+    }
+    chain
+}
+
 /// Whether a process has any child processes (a shell running a command, job or agent).
 /// Errs on the side of "busy": if it cannot tell, it says true.
 pub fn has_children(pid: u32) -> bool {

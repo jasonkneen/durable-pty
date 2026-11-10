@@ -109,6 +109,30 @@ sleep 1.5
 check "old output is searchable after an upgrade" 'printf "%s\n" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pty_search\",\"arguments\":{\"query\":\"hello-wor\"}}}" | "$BIN" mcp | grep -q "output"'
 check "printing into a closed pipe ends quietly" '! "$BIN" ls 2>&1 | head -1 | grep -q panicked && ! { "$BIN" ls | true; } 2>&1 | grep -q panicked'
 
+echo "# a session cannot act on itself"
+"$BIN" new -d -n inside -- sh >/dev/null
+"$BIN" new -d -n other -- sh -c 'sleep 300' >/dev/null
+INSIDE_PID=$(pid_of inside)
+R="$DPTY_HOME/inside"; mkdir -p "$R"
+cat > "$R/run.sh" <<SH
+export DPTY_HOME='$DPTY_HOME'
+for c in kill rm restart attach; do '$BIN' \$c inside >'$R'/\$c.out 2>&1; echo \$? >'$R'/\$c.rc; done
+'$BIN' send inside x >'$R'/send.out 2>&1; echo \$? >'$R'/send.rc
+'$BIN' ls --json >'$R'/ls.json
+'$BIN' kill other
+touch '$R'/finished
+SH
+"$BIN" send inside "sh '$R/run.sh'"
+for _ in $(seq 100); do [ -e "$R/finished" ] && break; sleep 0.1; done
+for c in kill rm restart attach send; do
+  check "$c on its own session is refused" '[ "$(cat "$R/'$c'.rc")" != 0 ] && grep -q "refused" "$R/'$c'.out"'
+done
+check "the session is untouched" '[ "$(pid_of inside)" = "$INSIDE_PID" ] && "$BIN" ls | grep inside | grep -q running'
+check "its own entry is marked in the list" 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if [s[\"name\"] for s in d if s.get(\"here\")]==[\"inside\"] else 1)" "$R/ls.json"'
+sleep 0.5
+check "it can still stop a different session" '! "$BIN" ls | grep other | grep -q running'
+check "from outside, the same session can be stopped" '"$BIN" kill inside -s KILL && sleep 0.5 && ! "$BIN" ls | grep inside | grep -q running'
+
 echo "# mcp (stdio)"
 OUT=$(printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}' \

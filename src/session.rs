@@ -405,6 +405,14 @@ impl Manager {
     }
 
     // ── lookup ───────────────────────────────────────────────────────────────
+    /// The running session a process lives inside, if any: the session whose program is the process or one of its
+    /// ancestors.
+    pub fn session_of_pid(&self, pid: u32) -> Option<String> {
+        let chain = crate::util::ancestry(pid);
+        let lives: Vec<_> = lock(&self.live).values().cloned().collect();
+        lives.into_iter().find(|l| lock(&l.meta).pid.is_some_and(|p| p > 0 && chain.contains(&p))).map(|l| l.id.clone())
+    }
+
     pub fn resolve(&self, key: &str) -> Result<String> {
         if key.is_empty() {
             bail!("a session id or name is required");
@@ -1139,10 +1147,11 @@ impl Manager {
 
     /// Flush everything durable. Without `kill_sessions` the shims keep every session running and the next daemon
     /// reattaches; with it, every session is stopped and recorded as exited.
-    pub fn shutdown(&self, kill_sessions: bool) {
+    /// `spare` is a session left running even with `kill_sessions`: the one the request came from.
+    pub fn shutdown(&self, kill_sessions: bool, spare: Option<&str>) {
         self.shutting_down.store(true, Ordering::SeqCst);
         if kill_sessions {
-            let lives: Vec<_> = lock(&self.live).values().cloned().collect();
+            let lives: Vec<_> = lock(&self.live).values().filter(|l| spare != Some(l.id.as_str())).cloned().collect();
             for l in lives {
                 {
                     let mut m = lock(&l.meta);

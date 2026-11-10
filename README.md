@@ -55,6 +55,8 @@ Not possible: keeping a program alive through a reboot or a killed shim. History
   `POST /mcp` (streamable HTTP), `GET /sse` + `POST /messages` (legacy SSE), `GET /health`.
 * **MCP tools**: `pty_list pty_new pty_send pty_screen pty_logs pty_wait pty_history pty_search pty_restart pty_kill`.
 
+A command run inside a session cannot attach to, type into, resize, stop, restart or delete that same session, and the browser marks it "you are here". This applies to the command line, the browser and `dpty mcp`; requests over HTTP/WebSocket cannot be traced to a session and are not covered.
+
 ## Data
 
 `~/.durable-pty/` (override with `DPTY_HOME`): `dpty.db` (sessions, 16 MB output per session, commands, events), `token`, `dpty.log`. All 0600/0700.

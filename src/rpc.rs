@@ -17,6 +17,42 @@ fn e<T: std::fmt::Display>(x: T) -> String {
     x.to_string()
 }
 
+pub const OWN_SESSION: &str = "refused: this is the session the request came from; a session cannot attach to, type into, resize, stop, restart or delete itself";
+
+/// A request made from inside a session may not act on that session. Stopping, restarting or deleting it takes the
+/// requester (and whatever launched it) down with it; attaching to it or typing into it feeds the session its own
+/// output. `caller` is the requesting process. Sessions in `list`/`get` answers are marked `here` when they are the
+/// caller's own.
+pub async fn dispatch_from(m: &Arc<Manager>, caller: Option<u32>, method: &str, mut p: Value) -> Result<Value, String> {
+    let guarded = matches!(method, "kill" | "rm" | "restart" | "send" | "resize");
+    if !guarded && !matches!(method, "shutdown" | "list" | "get") {
+        return dispatch(m, method, p).await;
+    }
+    let own = caller.and_then(|pid| m.session_of_pid(pid));
+    if let Some(own) = &own {
+        if guarded && m.resolve(s(&p, "id")?).is_ok_and(|id| &id == own) {
+            return Err(OWN_SESSION.into());
+        }
+        if method == "shutdown" && let Some(o) = p.as_object_mut() {
+            o.insert("spare".into(), json!(own));
+        }
+    }
+    let mut out = dispatch(m, method, p).await?;
+    if let Some(own) = &own {
+        let mark = |v: &mut Value| {
+            if v["id"] == json!(own) {
+                v["here"] = json!(true);
+            }
+        };
+        match method {
+            "get" => mark(&mut out),
+            "list" => out["sessions"].as_array_mut().into_iter().flatten().for_each(mark),
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
 pub async fn dispatch(m: &Arc<Manager>, method: &str, p: Value) -> Result<Value, String> {
     match method {
         "ping" => Ok(json!("pong")),
@@ -170,7 +206,7 @@ pub async fn dispatch(m: &Arc<Manager>, method: &str, p: Value) -> Result<Value,
             }
         }
         "shutdown" => {
-            m.shutdown(p.get("kill_sessions").and_then(|v| v.as_bool()).unwrap_or(false));
+            m.shutdown(p.get("kill_sessions").and_then(|v| v.as_bool()).unwrap_or(false), opt_s(&p, "spare"));
             tokio::spawn(async {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 std::process::exit(0);

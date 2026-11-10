@@ -45,6 +45,9 @@ struct Session {
     last_active_ms: i64,
     #[serde(default)]
     attached: u64,
+    /// The session this browser is running inside.
+    #[serde(default)]
+    here: bool,
 }
 
 impl Session {
@@ -384,6 +387,9 @@ impl Browser {
                     text: String::new(),
                 })
             }
+            (KeyCode::Char('l') | KeyCode::Enter | KeyCode::Char('r') | KeyCode::Char('s') | KeyCode::Char('d'), Some(s)) if s.here => {
+                return Action::Notice("This is the session you are in. It cannot be entered, stopped, restarted or deleted from inside itself.".into());
+            }
             (KeyCode::Char('l'), Some(s)) => {
                 return Action::View(s.id.clone(), s.heading().to_string(), "logs");
             }
@@ -694,7 +700,9 @@ fn draw(frame: &mut Frame<'_>, browser: &mut Browser) {
                         safe_text(&session.id),
                         safe_text(&session.kind),
                         ago(session.last_active_ms),
-                        if session.attached > 0 {
+                        if session.here {
+                            "  you are here"
+                        } else if session.attached > 0 {
                             "  attached"
                         } else {
                             ""
@@ -795,6 +803,7 @@ fn draw(frame: &mut Frame<'_>, browser: &mut Browser) {
                 let (r, c) = p.parser.screen().size();
                 format!(" Preview  {c}x{r} ")
             }
+            None if browser.selected().is_some_and(|s| s.here) => " Preview (this is the session you are in) ".to_string(),
             None => " Preview ".to_string(),
         };
         let block = Block::default().borders(Borders::ALL).title(title);
@@ -849,7 +858,8 @@ async fn refresh(browser: &mut Browser) -> Result<()> {
 
 /// Fetches the selected session's screen. It reads a copy: nothing is attached and the session is not resized.
 async fn refresh_preview(browser: &mut Browser) {
-    let Some(id) = browser.selected().map(|s| s.id.clone()) else {
+    // The browser's own session is not previewed: it would be a picture of this screen.
+    let Some(id) = browser.selected().filter(|s| !s.here).map(|s| s.id.clone()) else {
         browser.preview = None;
         return;
     };
@@ -1029,6 +1039,7 @@ mod tests {
             created_ms,
             last_active_ms: created_ms,
             attached: 0,
+            here: false,
         }
     }
 
@@ -1110,6 +1121,19 @@ mod tests {
         assert!(matches!(browser.key(key('d')), Action::None));
         assert_eq!(browser.confirm.as_ref().map(|c| c.kind), Some(ConfirmKind::Delete));
         assert!(matches!(browser.key(key('y')), Action::Delete(id) if id == "one"));
+    }
+
+    #[test]
+    fn the_session_the_browser_runs_in_cannot_be_acted_on() {
+        let mut own = session("me", "browser", "/tmp", "running", 1);
+        own.here = true;
+        let mut browser = Browser::default();
+        browser.replace_sessions(vec![own]);
+        for k in ['s', 'd', 'r', 'l'] {
+            assert!(matches!(browser.key(key(k)), Action::Notice(_)), "{k}");
+            assert!(browser.confirm.is_none(), "{k}");
+        }
+        assert!(matches!(browser.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)), Action::Notice(_)));
     }
 
     #[test]
