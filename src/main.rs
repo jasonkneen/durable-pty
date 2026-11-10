@@ -1,4 +1,5 @@
 mod agents;
+mod browser;
 mod client;
 mod daemon;
 mod db;
@@ -31,7 +32,7 @@ const DEFAULT_HTTP: &str = "127.0.0.1:7878";
 #[command(name = "dpty", version, about = "Durable PTY sessions: daemon, CLI and MCP server in one binary")]
 struct Cli {
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
@@ -65,6 +66,9 @@ enum Cmd {
         #[arg(long)]
         status: Option<String>,
     },
+    /// Browse, search, and attach to sessions interactively
+    #[command(visible_alias = "ui")]
+    Browse,
     /// Start a session: dpty new -n work -C ~/proj -- claude "fix the bug"
     New {
         #[arg(short, long)]
@@ -92,7 +96,12 @@ enum Cmd {
         cmd: Vec<String>,
     },
     /// Attach this terminal to a session (detach with Ctrl-\)
-    Attach { id: String },
+    Attach {
+        id: String,
+        /// Do not print the session's recent scrollback before the screen
+        #[arg(long)]
+        no_history: bool,
+    },
     Kill {
         id: String,
         #[arg(short, long)]
@@ -236,10 +245,45 @@ impl Drop for RawMode {
     }
 }
 
-async fn attach(id: &str) -> Result<()> {
+/// Where the detach key (Ctrl-\) starts in typed input. Terminals in an extended keyboard mode (which full-screen agents
+/// switch on) send it as an escape sequence instead of the single byte.
+fn find_detach(d: &[u8]) -> Option<usize> {
+    const FORMS: [&[u8]; 3] = [b"\x1c", b"\x1b[92;5u", b"\x1b[27;5;92~"];
+    FORMS.iter().filter_map(|f| d.windows(f.len()).position(|w| w == *f)).min()
+}
+
+/// Follows whether the program has the terminal on its alternate screen, so a detach can switch back.
+#[derive(Default)]
+struct AltScreen {
+    tail: Vec<u8>,
+    on: bool,
+}
+
+impl AltScreen {
+    fn feed(&mut self, d: &[u8]) {
+        let mut buf = std::mem::take(&mut self.tail);
+        buf.extend_from_slice(d);
+        let last = |pats: [&[u8]; 3]| pats.iter().filter_map(|p| buf.windows(p.len()).rposition(|w| w == *p)).max();
+        let on = last([b"\x1b[?1049h", b"\x1b[?1047h", b"\x1b[?47h"]);
+        let off = last([b"\x1b[?1049l", b"\x1b[?1047l", b"\x1b[?47l"]);
+        match (on, off) {
+            (Some(a), Some(b)) => self.on = a > b,
+            (Some(_), None) => self.on = true,
+            (None, Some(_)) => self.on = false,
+            (None, None) => {}
+        }
+        self.tail = buf[buf.len().saturating_sub(8)..].to_vec();
+    }
+}
+
+/// Puts the terminal back the way a shell expects it: the session's program set these modes, and it is still running.
+const TERMINAL_RESET: &[u8] =
+    b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1004l\x1b[?2004l\x1b[?1l\x1b>\x1b[<u\x1b[>4;0m\x1b[0m\x1b[?25h";
+
+async fn attach(id: &str, history: bool) -> Result<()> {
     let mut c = Client::connect_or_start().await?;
     let (cols, rows) = term_size();
-    let info = c.call("attach", json!({"id": id, "cols": cols, "rows": rows})).await?;
+    let info = c.call("attach", json!({"id": id, "cols": cols, "rows": rows, "history": history})).await?;
     let name = info["session"]["name"].as_str().unwrap_or(id).to_string();
     let mut reader = c.reader;
     let mut writer = c.writer;
@@ -270,10 +314,11 @@ async fn attach(id: &str) -> Result<()> {
     let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
     let mut out = tokio::io::stdout();
     let mut note = String::from("detached");
+    let mut alt = AltScreen::default();
     loop {
         tokio::select! {
             f = frx.recv() => match f {
-                Some((S_DATA, d)) => { out.write_all(&d).await?; out.flush().await?; }
+                Some((S_DATA, d)) => { alt.feed(&d); out.write_all(&d).await?; out.flush().await?; }
                 Some((S_EXIT, d)) => {
                     let code = if d.len() == 4 { i32::from_be_bytes([d[0], d[1], d[2], d[3]]) } else { -1 };
                     note = format!("process exited with code {code}");
@@ -283,7 +328,7 @@ async fn attach(id: &str) -> Result<()> {
             },
             i = irx.recv() => match i {
                 Some(d) => {
-                    if let Some(pos) = d.iter().position(|&b| b == 0x1c) {
+                    if let Some(pos) = find_detach(&d) {
                         if pos > 0 { write_frame(&mut writer, C_INPUT, &d[..pos]).await?; }
                         let _ = write_frame(&mut writer, C_DETACH, &[]).await;
                         break;
@@ -300,38 +345,60 @@ async fn attach(id: &str) -> Result<()> {
             }
         }
     }
+    if alt.on {
+        let _ = out.write_all(b"\x1b[?1049l").await;
+    }
+    let _ = out.write_all(TERMINAL_RESET).await;
+    let _ = out.flush().await;
     drop(raw);
     eprintln!("\r\n[{note}: {name}]");
     std::process::exit(0);
 }
 
 fn print_table(sessions: &[Value]) {
-    println!("{:<9} {:<18} {:<8} {:<8} {:<7} {:<5} {:<38} CWD", "ID", "NAME", "KIND", "STATUS", "PID", "AGE", "AGENT SESSION");
+    println!("{:<9} {:<18} {:<8} {:<8} {:<7} {:<5} {:<30} {:<38} CWD", "ID", "NAME", "KIND", "STATUS", "PID", "AGE", "TITLE", "AGENT SESSION");
     for s in sessions {
         println!(
-            "{:<9} {:<18} {:<8} {:<8} {:<7} {:<5} {:<38} {}",
+            "{:<9} {:<18} {:<8} {:<8} {:<7} {:<5} {:<30} {:<38} {}",
             s["id"].as_str().unwrap_or(""),
             s["name"].as_str().unwrap_or(""),
             s["kind"].as_str().unwrap_or(""),
             s["status"].as_str().unwrap_or(""),
             s["pid"].as_u64().map(|p| p.to_string()).unwrap_or("-".into()),
             age(s["started_ms"].as_i64().unwrap_or(0)),
+            s["title"].as_str().map(|t| t.chars().take(30).collect::<String>()).unwrap_or("-".into()),
             s["agent_session_id"].as_str().unwrap_or("-"),
             s["cwd"].as_str().unwrap_or(""),
         );
     }
 }
 
-#[tokio::main]
-async fn main() {
-    if let Err(e) = run(Cli::parse()).await {
+fn main() {
+    if let Err(e) = start(Cli::parse()) {
         eprintln!("dpty: {e}");
         std::process::exit(1);
     }
 }
 
+fn start(cli: Cli) -> Result<()> {
+    // Commands that only print: when the reader goes away (`dpty ls | head`), end quietly like any other tool.
+    if matches!(&cli.cmd, Some(Cmd::Ls { .. } | Cmd::Logs { .. } | Cmd::Screen { .. } | Cmd::History { .. } | Cmd::Events { .. } | Cmd::Status | Cmd::Token)) {
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+    }
+    // Shims use blocking I/O and their own threads, so they do not need a Tokio runtime.
+    if let Some(Cmd::Shim { spec }) = &cli.cmd {
+        return shim::run(spec);
+    }
+    let mut builder = if matches!(&cli.cmd, Some(Cmd::Serve { .. })) {
+        tokio::runtime::Builder::new_multi_thread()
+    } else {
+        tokio::runtime::Builder::new_current_thread()
+    };
+    builder.enable_all().build()?.block_on(run(cli))
+}
+
 async fn run(cli: Cli) -> Result<()> {
-    match cli.cmd {
+    match cli.cmd.unwrap_or(Cmd::Browse) {
         Cmd::Serve { http, no_http } => daemon::serve((!no_http).then_some(http)).await?,
         Cmd::Shim { spec } => shim::run(&spec)?,
         Cmd::Stop { sessions } => match Client::connect().await {
@@ -349,6 +416,7 @@ async fn run(cli: Cli) -> Result<()> {
             }
         },
         Cmd::Token => println!("{}", paths::token()),
+        Cmd::Browse => browser::run().await?,
         Cmd::Ls { json: as_json, label, status } => {
             let r = call("list", json!({"labels": kv(&label, "label")?, "status": status})).await?;
             let list = r["sessions"].as_array().cloned().unwrap_or_default();
@@ -376,10 +444,10 @@ async fn run(cli: Cli) -> Result<()> {
             if detach || !std::io::stdout().is_terminal() {
                 println!("{id}");
             } else {
-                attach(&id).await?;
+                attach(&id, true).await?;
             }
         }
-        Cmd::Attach { id } => attach(&id).await?,
+        Cmd::Attach { id, no_history } => attach(&id, !no_history).await?,
         Cmd::Kill { id, signal } => {
             call("kill", json!({"id": id, "signal": signal})).await?;
         }
@@ -443,4 +511,28 @@ async fn run(cli: Cli) -> Result<()> {
         bail!("unreachable");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detach_key_is_found_in_every_form_a_terminal_sends() {
+        assert_eq!(find_detach(b"ab\x1ccd"), Some(2));
+        assert_eq!(find_detach(b"x\x1b[92;5u"), Some(1));
+        assert_eq!(find_detach(b"\x1b[27;5;92~"), Some(0));
+        assert_eq!(find_detach(b"plain \x1b[A"), None);
+    }
+
+    #[test]
+    fn alternate_screen_is_tracked_across_chunks() {
+        let mut a = AltScreen::default();
+        a.feed(b"hello\x1b[?10");
+        assert!(!a.on);
+        a.feed(b"49hworld");
+        assert!(a.on);
+        a.feed(b"\x1b[?1049h then \x1b[?1049l");
+        assert!(!a.on);
+    }
 }

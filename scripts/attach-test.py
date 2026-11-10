@@ -21,6 +21,6 @@ os.write(m, b"\x1c")  # Ctrl-\ detaches
 p.wait(timeout=5)
 screen = subprocess.run([binp, "screen", "att"], env=env, capture_output=True, text=True).stdout
 assert "ECHO:hello" in screen, screen
-subprocess.run([binp, "stop"], env=env, capture_output=True)
+subprocess.run([binp, "stop", "--sessions"], env=env, capture_output=True)
 shutil.rmtree(home, ignore_errors=True)
 print("attach/detach OK")

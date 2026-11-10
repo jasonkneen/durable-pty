@@ -111,6 +111,17 @@ pub async fn dispatch(m: &Arc<Manager>, method: &str, p: Value) -> Result<Value,
             }
         }
         "screen" => Ok(json!({"text": m.screen_of(s(&p, "id")?).map_err(e)?})),
+        "snapshot" => {
+            let (bytes, cols, rows, running) = m.snapshot_of(s(&p, "id")?).map_err(e)?;
+            Ok(json!({"b64": base64::engine::general_purpose::STANDARD.encode(bytes), "cols": cols, "rows": rows, "running": running}))
+        }
+        "search" => {
+            let query = s(&p, "query")?.to_string();
+            let limit = p.get("limit").and_then(|v| v.as_u64()).unwrap_or(100).clamp(1, 1000) as usize;
+            let m = m.clone();
+            let hits = tokio::task::spawn_blocking(move || m.search(&query, limit)).await.map_err(e)?.map_err(e)?;
+            Ok(json!({"hits": hits}))
+        }
         "commands" => {
             let id = m.resolve(s(&p, "id")?).map_err(e)?;
             let n = p.get("limit").and_then(|v| v.as_i64()).unwrap_or(100);
@@ -138,7 +149,7 @@ pub async fn dispatch(m: &Arc<Manager>, method: &str, p: Value) -> Result<Value,
             Ok(json!({"ok": true}))
         }
         "wait" => {
-            let key = s(&p, "id")?.to_string();
+            let key = m.resolve(s(&p, "id")?).map_err(e)?;
             let pat = s(&p, "pattern")?.to_string();
             let timeout = p.get("timeout_ms").and_then(|v| v.as_u64()).unwrap_or(30_000).min(600_000);
             let deadline = std::time::Instant::now() + Duration::from_millis(timeout);

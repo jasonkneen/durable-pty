@@ -86,11 +86,10 @@ pub fn prepare(row: &mut SessionRow) {
             row.args.insert(0, "--session-id".into());
             row.agent_session_id = Some(id);
         }
-        "codex" => {
-            if row.args.first().map(String::as_str) == Some("resume") {
+        "codex"
+            if row.args.first().map(String::as_str) == Some("resume") => {
                 row.agent_session_id = row.args.get(1).filter(|v| looks_like_id(v)).cloned();
             }
-        }
         _ => {}
     }
 }
@@ -113,14 +112,13 @@ pub fn forget_resume(row: &mut SessionRow) -> bool {
             }
             row.args = rest;
         }
-        "codex" => {
-            if row.args.first().map(String::as_str) == Some("resume") {
+        "codex"
+            if row.args.first().map(String::as_str) == Some("resume") => {
                 row.args.remove(0);
                 if row.args.first().is_some_and(|v| looks_like_id(v)) {
                     row.args.remove(0);
                 }
             }
-        }
         _ => {}
     }
     row.agent_session_id = None;
@@ -186,7 +184,7 @@ pub fn resume(row: &mut SessionRow) -> bool {
     }
 }
 
-fn shell_split(s: &str) -> Vec<String> {
+pub fn shell_split(s: &str) -> Vec<String> {
     let mut out = vec![];
     let mut cur = String::new();
     let mut quote: Option<char> = None;
@@ -229,6 +227,36 @@ fn canon(p: &str) -> String {
 pub fn claude_project_dir(cwd: &str) -> PathBuf {
     let enc: String = canon(cwd).chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
     home().join(".claude").join("projects").join(enc)
+}
+
+/// The file an agent keeps a session's conversation in, when we know the agent's session id and where it writes.
+pub fn transcript_path(row: &SessionRow) -> Option<PathBuf> {
+    let id = row.agent_session_id.as_deref()?;
+    match row.kind.as_str() {
+        "claude" => Some(claude_project_dir(&row.cwd).join(format!("{id}.jsonl"))).filter(|p| p.is_file()),
+        "codex" => find_codex_transcript(&home().join(".codex").join("sessions"), id),
+        _ => None,
+    }
+}
+
+/// Codex writes `<root>/<year>/<month>/<day>/rollout-<time>-<id>.jsonl`.
+fn find_codex_transcript(root: &Path, id: &str) -> Option<PathBuf> {
+    let suffix = format!("{id}.jsonl");
+    let mut stack = vec![(root.to_path_buf(), 0)];
+    while let Some((dir, depth)) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if depth < 4 {
+                    stack.push((p, depth + 1));
+                }
+            } else if p.file_name().is_some_and(|n| n.to_string_lossy().ends_with(&suffix)) {
+                return Some(p);
+            }
+        }
+    }
+    None
 }
 
 /// Finds the agent's own session id when we did not assign it: the newest transcript written for this cwd since launch,
@@ -309,7 +337,7 @@ mod tests {
             id: "i".into(), name: "n".into(), cmd: kind.into(), args: args.iter().map(|s| s.to_string()).collect(), cwd: "/tmp".into(),
             env: BTreeMap::new(), labels: BTreeMap::new(), kind: kind.into(), agent_session_id: None, resume_cmd: None,
             restart: "on-failure".into(), status: "running".into(), exit_code: None, pid: None, cols: 80, rows: 24,
-            created_ms: 0, started_ms: 0, ended_ms: None, last_active_ms: 0, restarts: 0, live_cwd: None,
+            created_ms: 0, started_ms: 0, ended_ms: None, last_active_ms: 0, restarts: 0, live_cwd: None, title: None,
         }
     }
 
@@ -366,6 +394,19 @@ mod tests {
         r.agent_session_id = Some("019a0000-1111-2222-3333-444455556666".into());
         assert!(resume(&mut r));
         assert_eq!(r.args, ["resume", "019a0000-1111-2222-3333-444455556666", "--model", "gpt-x"]);
+    }
+
+    #[test]
+    fn codex_transcript_is_found_by_session_id() {
+        let root = std::env::temp_dir().join(format!("dpty-codex-test-{}", std::process::id()));
+        let day = root.join("2026").join("11").join("10");
+        std::fs::create_dir_all(&day).unwrap();
+        let id = "019a0000-1111-2222-3333-444455556666";
+        let file = day.join(format!("rollout-2026-11-10T00-00-00-{id}.jsonl"));
+        std::fs::write(&file, "{}\n").unwrap();
+        assert_eq!(find_codex_transcript(&root, id), Some(file));
+        assert_eq!(find_codex_transcript(&root, "ffffffff-0000-0000-0000-000000000000"), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

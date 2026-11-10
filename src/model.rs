@@ -31,4 +31,7 @@ pub struct SessionRow {
     /// Where a shell or plain process currently is, so a restart lands in the same directory.
     #[serde(default)]
     pub live_cwd: Option<String>,
+    /// Latest terminal title the program set (OSC 0/2), e.g. an agent's thread name.
+    #[serde(default)]
+    pub title: Option<String>,
 }

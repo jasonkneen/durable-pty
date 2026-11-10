@@ -38,8 +38,30 @@ struct ExitMsg {
     lost: bool,
 }
 
+/// Collects the window title a program sets (OSC 0/2) so the session can show it.
+#[derive(Default)]
+pub struct TitleCb {
+    title: Option<String>,
+}
+
+impl vt100::Callbacks for TitleCb {
+    fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
+        self.title = Some(String::from_utf8_lossy(title).into_owned());
+    }
+}
+
+/// Drops control characters and leading status glyphs (spinners, `✳`) so the title only changes when the text does.
+pub fn clean_title(raw: &str) -> Option<String> {
+    let t: String = raw.chars().filter(|c| !c.is_control()).collect();
+    let t = t.trim_start_matches(|c: char| !c.is_alphanumeric()).trim_end();
+    if t.is_empty() {
+        return None;
+    }
+    Some(t.chars().take(200).collect())
+}
+
 pub struct Screen {
-    pub parser: vt100::Parser,
+    pub parser: vt100::Parser<TitleCb>,
     pub ring: Vec<u8>,
     pub seq: i64,
     pub dirty: bool,
@@ -98,11 +120,10 @@ impl InputTracker {
                     self.buf.pop();
                 }
                 0x03 | 0x15 => self.buf.clear(),
-                0x20..=0xff => {
-                    if record && self.buf.len() < 4096 {
+                0x20..=0xff
+                    if record && self.buf.len() < 4096 => {
                         self.buf.push(b)
                     }
-                }
                 _ => {}
             }
         }
@@ -159,9 +180,11 @@ impl Live {
 
     fn apply(&self, data: &[u8], skip: usize, end: Option<u64>) {
         let ts = now_ms();
+        let title;
         {
             let mut s = lock(&self.screen);
             s.parser.process(data);
+            title = s.parser.callbacks_mut().title.take();
             s.dirty = true;
             let fresh = &data[skip..];
             if !fresh.is_empty() {
@@ -181,7 +204,20 @@ impl Live {
                 self.consumed.fetch_max(e, Ordering::SeqCst);
             }
         }
-        lock(&self.meta).last_active_ms = ts;
+        let changed = {
+            let mut m = lock(&self.meta);
+            m.last_active_ms = ts;
+            match title.as_deref().and_then(clean_title) {
+                Some(t) if m.title.as_deref() != Some(t.as_str()) => {
+                    m.title = Some(t.clone());
+                    Some(t)
+                }
+                _ => None,
+            }
+        };
+        if let Some(t) = changed {
+            self.db.add_event(Some(&self.id), "title", &t);
+        }
     }
 
     /// Atomically takes the current screen and subscribes, so no output is lost or repeated.
@@ -189,6 +225,25 @@ impl Live {
         let s = lock(&self.screen);
         let rx = self.tx.subscribe();
         (snapshot_bytes(&s), rx)
+    }
+
+    /// Like `subscribe`, with the recent scrollback as plain text ahead of the screen, so a terminal attaching to a shell
+    /// can scroll back. Plain text only: replaying raw output would replay its terminal queries too. Full-screen programs
+    /// have no scrollback worth showing.
+    pub fn subscribe_with_history(&self) -> (Vec<u8>, broadcast::Receiver<Frame>) {
+        let s = lock(&self.screen);
+        let rx = self.tx.subscribe();
+        let mut v = vec![];
+        if !s.parser.screen().alternate_screen() {
+            let tail = &s.ring[s.ring.len().saturating_sub(256 * 1024)..];
+            let text = crate::util::strip_ansi(tail);
+            // Start at a line boundary: the tail may begin mid-line.
+            let text = text.split_once('\n').map(|(_, rest)| rest).unwrap_or("");
+            v.extend(text.replace('\n', "\r\n").into_bytes());
+            v.extend(b"\r\n");
+        }
+        v.extend(snapshot_bytes(&s));
+        (v, rx)
     }
 
     pub fn screen_text(&self) -> String {
@@ -222,7 +277,21 @@ impl Live {
             bail!("invalid size");
         }
         let _ = self.command(ShimCmd::Resize(cols, rows));
-        lock(&self.screen).parser.screen_mut().set_size(rows, cols);
+        {
+            let mut s = lock(&self.screen);
+            let (old_rows, _) = s.parser.screen().size();
+            if rows < old_rows && !s.parser.screen().alternate_screen() {
+                // Shrinking cuts rows off the bottom, where a shell's prompt is. Rebuild from recent output instead, so
+                // the newest lines stay in view as they would in a real terminal. (A full-screen program redraws itself.)
+                let mut parser = vt100::Parser::new_with_callbacks(rows, cols, 0, TitleCb::default());
+                parser.process(&s.ring);
+                parser.callbacks_mut().title = None;
+                s.parser = parser;
+            } else {
+                s.parser.screen_mut().set_size(rows, cols);
+            }
+            s.dirty = true;
+        }
         let mut m = lock(&self.meta);
         m.cols = cols;
         m.rows = rows;
@@ -327,6 +396,9 @@ impl Manager {
             restart_log: Mutex::new(HashMap::new()),
             started_ms: now_ms(),
         });
+        // Output stored by a version without the search index is indexed once, in the background.
+        let idb = m.db.clone();
+        let _ = std::thread::Builder::new().name("dpty-index".into()).spawn(move || index_stored_output(&idb));
         tokio::spawn(m.clone().exit_loop(exit_rx));
         tokio::spawn(m.clone().maintenance());
         m
@@ -334,16 +406,12 @@ impl Manager {
 
     // ── lookup ───────────────────────────────────────────────────────────────
     pub fn resolve(&self, key: &str) -> Result<String> {
-        let rows = self.db.list_sessions()?;
-        if let Some(r) = rows.iter().find(|r| r.id == key) {
-            return Ok(r.id.clone());
+        if key.is_empty() {
+            bail!("a session id or name is required");
         }
-        if let Some(r) = rows.iter().find(|r| r.name == key) {
-            return Ok(r.id.clone());
-        }
-        let m: Vec<_> = rows.iter().filter(|r| r.id.starts_with(key)).collect();
-        match m.len() {
-            1 => Ok(m[0].id.clone()),
+        let mut ids = self.db.find_ids(key)?;
+        match ids.len() {
+            1 => Ok(ids.remove(0)),
             0 => bail!("no session matches '{key}'"),
             _ => bail!("'{key}' is ambiguous"),
         }
@@ -371,6 +439,11 @@ impl Manager {
             None => (false, 0),
         };
         let mut v = serde_json::to_value(&row).unwrap_or(Value::Null);
+        // The environment holds credentials (API keys): callers, including agents over MCP, only get the variable names.
+        v["env_keys"] = json!(row.env.keys().collect::<Vec<_>>());
+        if let Some(o) = v.as_object_mut() {
+            o.remove("env");
+        }
         v["running"] = json!(running);
         v["attached"] = json!(attached);
         v
@@ -407,7 +480,7 @@ impl Manager {
         }
         let name = match req.name {
             Some(n) if !n.is_empty() => {
-                if self.db.list_sessions()?.iter().any(|r| r.name == n) {
+                if self.db.name_taken(&n, "")? {
                     bail!("a session named '{n}' already exists");
                 }
                 n
@@ -419,7 +492,7 @@ impl Manager {
             id: id.clone(), name, cmd, args, cwd, env, labels: req.labels, kind, agent_session_id: req.agent_session_id,
             resume_cmd: req.resume_cmd, restart, status: "running".into(), exit_code: None, pid: None,
             cols: req.cols.unwrap_or(120).max(2), rows: req.rows.unwrap_or(32).max(2), created_ms: now, started_ms: now,
-            ended_ms: None, last_active_ms: now, restarts: 0, live_cwd: None,
+            ended_ms: None, last_active_ms: now, restarts: 0, live_cwd: None, title: None,
         };
         agents::prepare(&mut row);
         self.db.upsert_session(&row)?;
@@ -437,7 +510,7 @@ impl Manager {
 
     fn new_live(&self, row: SessionRow, prime: bool) -> Arc<Live> {
         let (tx, _) = broadcast::channel(1024);
-        let mut parser = vt100::Parser::new(row.rows, row.cols, 0);
+        let mut parser = vt100::Parser::new_with_callbacks(row.rows, row.cols, 0, TitleCb::default());
         let mut ring = vec![];
         let (mut consumed, mut offset) = (0, 0);
         if prime {
@@ -510,6 +583,8 @@ impl Manager {
             bail!("{}", why.trim());
         }
         let _ = self.db.reset_offsets(&meta.id);
+        // Each launch has its own start time: the quick-resume-failure check and the agent transcript scan measure from it.
+        lock(&live.meta).started_ms = now_ms();
         live.consumed.store(0, Ordering::SeqCst);
         lock(&live.screen).offset = 0;
         self.attach_shim(live, 0).await
@@ -588,12 +663,42 @@ impl Manager {
                     _ => {}
                 }
             }
-            // The connection ended without the process reporting an exit: the helper itself is gone.
-            if !exited && !me.shutting_down.load(Ordering::SeqCst) {
-                let _ = exit_tx.send(ExitMsg { id: l.id.clone(), epoch, code: -1, lost: true });
+            // The connection ended without the process reporting an exit. That is not proof the helper died: it drops a
+            // daemon that stalls. Reconnect and carry on from where the screen stands; only a helper that cannot be
+            // reached is gone.
+            if !exited && !me.shutting_down.load(Ordering::SeqCst) && l.epoch.load(Ordering::SeqCst) == epoch && !l.removed.load(Ordering::SeqCst) {
+                *lock(&l.link) = None;
+                if !me.clone().reconnect(l.clone()).await {
+                    let _ = exit_tx.send(ExitMsg { id: l.id.clone(), epoch, code: -1, lost: true });
+                }
             }
         });
         Ok(())
+    }
+
+    /// Tries to get back to a session's helper after its connection dropped. Boxed because attaching spawns the task
+    /// that calls this.
+    fn reconnect(self: Arc<Self>, live: Arc<Live>) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> {
+        Box::pin(async move {
+            let killed = live.user_killed.load(Ordering::SeqCst);
+            for attempt in 0..4u64 {
+                tokio::time::sleep(Duration::from_millis(100 + attempt * 150)).await;
+                if self.shutting_down.load(Ordering::SeqCst) || live.removed.load(Ordering::SeqCst) {
+                    return true;
+                }
+                // A helper that is gone refuses the connection at once: no point waiting on it.
+                if UnixStream::connect(shim::sock_path(&live.id)).await.is_err() {
+                    return false;
+                }
+                let from = lock(&live.screen).offset;
+                if self.attach_shim(&live, from).await.is_ok() {
+                    live.user_killed.store(killed, Ordering::SeqCst);
+                    self.db.add_event(Some(&live.id), "reconnected", "connection to the session helper was re-established");
+                    return true;
+                }
+            }
+            false
+        })
     }
 
     fn restart_allowed(&self, id: &str) -> bool {
@@ -632,7 +737,8 @@ impl Manager {
                     let me = self.clone();
                     tokio::spawn(async move {
                         tokio::time::sleep(Duration::from_millis(500)).await;
-                        me.respawn(&live).await;
+                        // Launch as prepared: resuming here would turn the new conversation id into another failed resume.
+                        me.respawn(&live, false).await;
                     });
                     continue;
                 }
@@ -648,7 +754,7 @@ impl Manager {
                 let me = self.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(800)).await;
-                    me.respawn(&live).await;
+                    me.respawn(&live, true).await;
                 });
             } else {
                 if want {
@@ -659,10 +765,10 @@ impl Manager {
         }
     }
 
-    async fn respawn(self: &Arc<Self>, live: &Arc<Live>) {
+    async fn respawn(self: &Arc<Self>, live: &Arc<Live>, resume: bool) {
         {
             let mut m = lock(&live.meta);
-            let resumed = agents::resume(&mut m);
+            let resumed = resume && agents::resume(&mut m);
             live.resuming.store(resumed, Ordering::SeqCst);
             if resumed {
                 self.db.add_event(Some(&m.id), "resume", &format!("{} {}", m.cmd, m.args.join(" ")));
@@ -699,14 +805,30 @@ impl Manager {
         self.db.add_event(Some(&live.id), if lost { "lost" } else { "exited" }, &if lost { "helper process disappeared".to_string() } else { code.to_string() });
     }
 
-    pub fn kill(&self, key: &str, signal: Option<&str>) -> Result<()> {
+    pub fn kill(self: &Arc<Self>, key: &str, signal: Option<&str>) -> Result<()> {
         let live = self.running(key)?;
         live.user_killed.store(true, Ordering::SeqCst);
-        let sig = match signal {
-            Some(s) => Some(signal_number(s).ok_or_else(|| anyhow!("unknown signal '{s}'"))?),
-            None => None,
-        };
-        live.signal(sig)
+        match signal {
+            Some(s) => live.signal(Some(signal_number(s).ok_or_else(|| anyhow!("unknown signal '{s}'"))?)),
+            None => self.stop_process(&live),
+        }
+    }
+
+    /// Asks the program to go (HUP), then insists (TERM, KILL) if it is still there, so a stop or restart always lands.
+    fn stop_process(self: &Arc<Self>, live: &Arc<Live>) -> Result<()> {
+        live.signal(None)?;
+        let epoch = live.epoch.load(Ordering::SeqCst);
+        let live = live.clone();
+        tokio::spawn(async move {
+            for sig in [libc::SIGTERM, libc::SIGKILL] {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                if live.epoch.load(Ordering::SeqCst) != epoch || !live.is_running() {
+                    return;
+                }
+                let _ = live.signal(Some(sig));
+            }
+        });
+        Ok(())
     }
 
     pub fn remove(&self, key: &str) -> Result<()> {
@@ -726,12 +848,11 @@ impl Manager {
     /// Relaunches a session, resuming the agent conversation when we know its id.
     pub async fn restart(self: &Arc<Self>, key: &str) -> Result<()> {
         let id = self.resolve(key)?;
-        if let Some(live) = self.live(&id) {
-            if live.is_running() {
+        if let Some(live) = self.live(&id)
+            && live.is_running() {
                 live.force_restart.store(true, Ordering::SeqCst);
-                return live.signal(None);
+                return self.stop_process(&live);
             }
-        }
         let row = self.db.get_session(&id)?.ok_or_else(|| anyhow!("no such session"))?;
         self.revive(row).await;
         Ok(())
@@ -741,7 +862,7 @@ impl Manager {
         let live = self.new_live(row, true);
         lock(&self.live).insert(live.id.clone(), live.clone());
         live.emit(b"\r\n\x1b[2m[durable-pty: session restored]\x1b[0m\r\n");
-        self.respawn(&live).await;
+        self.respawn(&live, true).await;
     }
 
     /// Run once at boot. A session whose helper process is still alive is reattached with nothing lost; one whose
@@ -749,10 +870,16 @@ impl Manager {
     pub async fn recover(self: &Arc<Self>) {
         let Ok(rows) = self.db.list_sessions() else { return };
         for mut row in rows {
-            if row.status != "running" {
+            // A session recorded as lost whose helper still answers was only out of reach: take it back.
+            let was_lost = row.status == "lost";
+            if row.status != "running" && !was_lost {
                 continue;
             }
-            if UnixStream::connect(shim::sock_path(&row.id)).await.is_ok() {
+            let reachable = UnixStream::connect(shim::sock_path(&row.id)).await.is_ok();
+            if was_lost && !reachable {
+                continue;
+            }
+            if reachable {
                 let live = self.new_live(row.clone(), true);
                 lock(&self.live).insert(live.id.clone(), live.clone());
                 let from = lock(&live.screen).offset;
@@ -802,7 +929,10 @@ impl Manager {
         let id = self.resolve(key)?;
         let mut row = self.row(&id)?;
         if let Some(n) = name {
-            if self.db.list_sessions()?.iter().any(|r| r.name == n && r.id != id) {
+            if n.is_empty() {
+                bail!("a name cannot be empty");
+            }
+            if self.db.name_taken(&n, &id)? {
                 bail!("a session named '{n}' already exists");
             }
             row.name = n;
@@ -828,12 +958,13 @@ impl Manager {
         Ok(())
     }
 
-    pub fn attach(&self, key: &str, cols: u16, rows: u16) -> Result<(Arc<Live>, Vec<u8>, broadcast::Receiver<Frame>)> {
+    pub fn attach(&self, key: &str, cols: u16, rows: u16, history: bool) -> Result<(Arc<Live>, Vec<u8>, broadcast::Receiver<Frame>)> {
         let live = self.running(key)?;
         if cols > 0 && rows > 0 {
             let _ = live.resize(cols, rows);
         }
-        let (snap, rx) = live.subscribe();
+        let shell = matches!(lock(&live.meta).kind.as_str(), "shell" | "process");
+        let (snap, rx) = if history && shell { live.subscribe_with_history() } else { live.subscribe() };
         Ok((live, snap, rx))
     }
 
@@ -857,6 +988,44 @@ impl Manager {
         Ok(p.screen().contents())
     }
 
+    /// The screen as terminal bytes plus its size, without attaching or resizing: (bytes, cols, rows, running).
+    pub fn snapshot_of(&self, key: &str) -> Result<(Vec<u8>, u16, u16, bool)> {
+        let id = self.resolve(key)?;
+        if let Some(l) = self.live(&id) {
+            let s = lock(&l.screen);
+            let (rows, cols) = s.parser.screen().size();
+            return Ok((snapshot_bytes(&s), cols, rows, l.is_running()));
+        }
+        let row = self.db.get_session(&id)?.ok_or_else(|| anyhow!("no such session"))?;
+        Ok((self.db.get_screen(&id)?, row.cols, row.rows, false))
+    }
+
+    /// Searches everything kept about every session: output, typed commands and, for claude and codex sessions, the
+    /// conversation transcript. Blocking (database and file reads).
+    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Value>> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut out: Vec<Value> = self
+            .db
+            .search(query, limit as i64)?
+            .into_iter()
+            .map(|(id, source, ts, text)| json!({"id": id, "source": source, "ts": ts, "text": crate::util::excerpt(&text, query, 160)}))
+            .collect();
+        for r in self.db.list_sessions()? {
+            if out.len() >= limit * 3 {
+                break;
+            }
+            if let Some(file) = agents::transcript_path(&r) {
+                for text in crate::util::grep_file(&file, query, 3) {
+                    out.push(json!({"id": r.id, "source": "transcript", "ts": r.last_active_ms, "text": text}));
+                }
+            }
+        }
+        Ok(out)
+    }
+
     // ── background work ──────────────────────────────────────────────────────
     async fn maintenance(self: Arc<Self>) {
         let mut tick = 0u64;
@@ -866,20 +1035,57 @@ impl Manager {
             if self.shutting_down.load(Ordering::SeqCst) {
                 return;
             }
-            if tick % 3 == 0 {
+            if tick.is_multiple_of(3) {
                 self.scan_agents().await;
             }
-            if tick % 2 == 0 {
+            if tick.is_multiple_of(2) {
                 self.save_state();
             }
-            if tick % 60 == 0 {
-                let db = self.db.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    for r in db.list_sessions().unwrap_or_default() {
-                        let _ = db.prune_output(&r.id, OUTPUT_CAP);
-                    }
-                })
-                .await;
+            if tick.is_multiple_of(60) {
+                self.autoclean();
+            }
+        }
+    }
+
+    /// Removes sessions nobody will come back to. Off unless asked for, because it deletes history. A running plain
+    /// shell goes when no client is attached, it has no child processes (nothing running in it), and it has been silent
+    /// for `DPTY_IDLE_SHELL_SECS`. An exited shell/process session goes `DPTY_EXITED_KEEP_SECS` after it ended. Agent
+    /// sessions are never touched (they can be resumed), nor is anything labelled `keep`. Unset or 0 disables each.
+    pub fn autoclean(&self) {
+        let idle_ms = crate::util::env_secs("DPTY_IDLE_SHELL_SECS", 0) as i64 * 1000;
+        let exited_ms = crate::util::env_secs("DPTY_EXITED_KEEP_SECS", 0) as i64 * 1000;
+        let now = now_ms();
+        let mut doomed: Vec<(String, &'static str)> = vec![];
+        if idle_ms > 0 {
+            let lives: Vec<_> = lock(&self.live).values().cloned().collect();
+            for l in lives {
+                let m = lock(&l.meta).clone();
+                let idle = m.kind == "shell"
+                    && !m.labels.contains_key("keep")
+                    && l.is_running()
+                    && l.tx.receiver_count() == 0
+                    && now - m.last_active_ms > idle_ms
+                    && m.pid.is_some_and(|p| p > 0 && !crate::util::has_children(p));
+                if idle {
+                    doomed.push((m.id, "idle empty shell"));
+                }
+            }
+        }
+        if exited_ms > 0 {
+            for r in self.db.list_sessions().unwrap_or_default() {
+                let stale = matches!(r.kind.as_str(), "shell" | "process")
+                    && r.status != "running"
+                    && !r.labels.contains_key("keep")
+                    && self.live(&r.id).is_none_or(|l| !l.is_running())
+                    && now - r.ended_ms.unwrap_or(r.last_active_ms) > exited_ms;
+                if stale {
+                    doomed.push((r.id, "exited"));
+                }
+            }
+        }
+        for (id, why) in doomed {
+            if self.remove(&id).is_ok() {
+                self.db.add_event(None, "autoclean", &format!("{id}: {why}"));
             }
         }
     }
@@ -901,13 +1107,11 @@ impl Manager {
             }
             {
                 let mut m = lock(&l.meta);
-                if !matches!(m.kind.as_str(), "claude" | "codex" | "grok") {
-                    if let Some(pid) = m.pid.filter(|p| *p > 0) {
-                        if let Some(d) = crate::util::process_cwd(pid) {
+                if !matches!(m.kind.as_str(), "claude" | "codex" | "grok")
+                    && let Some(pid) = m.pid.filter(|p| *p > 0)
+                        && let Some(d) = crate::util::process_cwd(pid) {
                             m.live_cwd = Some(d);
                         }
-                    }
-                }
             }
             let m = lock(&l.meta).clone();
             let _ = self.db.upsert_session(&m);
@@ -963,33 +1167,106 @@ impl Manager {
     }
 }
 
+/// Builds the search index for output that was stored before the index existed. Works a page at a time so the
+/// database is never held for long, and records completion so it runs once.
+fn index_stored_output(db: &Db) {
+    const DONE: &str = "lines_backfilled";
+    if db.meta(DONE).is_some() {
+        return;
+    }
+    for id in db.unindexed_sessions().unwrap_or_default() {
+        let mut plain = crate::util::PlainLines::default();
+        let mut after = 0;
+        loop {
+            let Ok(page) = db.output_page(&id, after, 256) else { return };
+            let Some(last) = page.last() else { break };
+            after = last.0;
+            let mut lines: Vec<(String, i64, String)> = vec![];
+            for (_, ts, data) in &page {
+                lines.extend(plain.feed(data).into_iter().map(|text| (id.clone(), *ts, text)));
+            }
+            if !lines.is_empty() && db.append_lines(&lines).is_err() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    let _ = db.set_meta(DONE, "1");
+}
+
 fn output_writer(db: Arc<Db>, rx: std_mpsc::Receiver<OutMsg>) {
-    let mut batch: Vec<(String, i64, i64, Vec<u8>, Option<u64>)> = vec![];
+    let mut batch: Vec<crate::db::OutChunk> = vec![];
+    let mut lines: Vec<(String, i64, String)> = vec![];
+    // Per session: the plain-text extractor feeding the search index.
+    let mut plain: HashMap<String, crate::util::PlainLines> = HashMap::new();
+    // Sessions that wrote since the last prune: only those can be over the cap.
+    let mut wrote: HashSet<String> = HashSet::new();
     let mut last = Instant::now();
-    let flush = |batch: &mut Vec<(String, i64, i64, Vec<u8>, Option<u64>)>| {
+    let mut pruned = Instant::now();
+    let flush = |batch: &mut Vec<crate::db::OutChunk>, lines: &mut Vec<(String, i64, String)>| {
         if !batch.is_empty() {
             let _ = db.append_output(batch);
             batch.clear();
         }
+        if !lines.is_empty() {
+            let _ = db.append_lines(lines);
+            lines.clear();
+        }
     };
     loop {
         match rx.recv_timeout(Duration::from_millis(250)) {
-            Ok(OutMsg::Chunk(a, b, c, d, e)) => batch.push((a, b, c, d, e)),
+            Ok(OutMsg::Chunk(id, seq, ts, data, end)) => {
+                for text in plain.entry(id.clone()).or_default().feed(&data) {
+                    lines.push((id.clone(), ts, text));
+                }
+                wrote.insert(id.clone());
+                batch.push((id, seq, ts, data, end));
+            }
             Ok(OutMsg::Flush(ack)) => {
-                flush(&mut batch);
+                flush(&mut batch, &mut lines);
                 last = Instant::now();
                 let _ = ack.send(());
                 continue;
             }
             Err(std_mpsc::RecvTimeoutError::Timeout) => {}
             Err(std_mpsc::RecvTimeoutError::Disconnected) => {
-                flush(&mut batch);
+                flush(&mut batch, &mut lines);
                 return;
             }
         }
         if batch.len() >= 512 || last.elapsed() >= Duration::from_millis(250) {
-            flush(&mut batch);
+            flush(&mut batch, &mut lines);
             last = Instant::now();
         }
+        if pruned.elapsed() >= Duration::from_secs(60) {
+            for id in wrote.drain() {
+                let _ = db.prune_output(&id, OUTPUT_CAP);
+            }
+            plain.retain(|id, _| db.get_session(id).ok().flatten().is_some());
+            pruned = Instant::now();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn title_from_osc() {
+        let mut p = vt100::Parser::new_with_callbacks(24, 80, 0, TitleCb::default());
+        p.process(b"hi\x1b]0;\xe2\x9c\xb3 Fix the bug\x07there");
+        assert_eq!(p.callbacks_mut().title.take().as_deref().and_then(clean_title).as_deref(), Some("Fix the bug"));
+        p.process(b"\x1b]2;\xe2\xa0\x82 Fix the bug\x1b\\");
+        assert_eq!(p.callbacks_mut().title.take().as_deref().and_then(clean_title).as_deref(), Some("Fix the bug"));
+        p.process(b"no title here");
+        assert!(p.callbacks_mut().title.take().is_none());
+    }
+
+    #[test]
+    fn clean_title_rules() {
+        assert_eq!(clean_title("  "), None);
+        assert_eq!(clean_title("✳"), None);
+        assert_eq!(clean_title("zsh ~/proj ").as_deref(), Some("zsh ~/proj"));
     }
 }

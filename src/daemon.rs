@@ -9,6 +9,11 @@ use tokio::net::UnixListener;
 
 pub async fn serve(http_addr: Option<String>) -> Result<()> {
     paths::ensure_home()?;
+    // One daemon per home: the lock is held for the life of the process, so two racing starts cannot both win.
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(paths::home().join("dpty.lock"))?;
+    if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&lock), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        bail!("durable-pty is already running ({})", paths::sock().display());
+    }
     if Client::connect().await.is_ok() {
         bail!("durable-pty is already running ({})", paths::sock().display());
     }
@@ -53,6 +58,7 @@ pub async fn serve(http_addr: Option<String>) -> Result<()> {
     }
     mgr.shutdown(false);
     let _ = std::fs::remove_file(paths::sock());
+    drop(lock);
     eprintln!("durable-pty: stopped; sessions are recorded and will be restored on next start");
     Ok(())
 }

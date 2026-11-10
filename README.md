@@ -7,6 +7,7 @@ is stored in SQLite, and agent sessions (claude, codex) are **resumed** after a 
 ```
 dpty new -n work -C ~/proj -- claude "fix the bug"   # starts the daemon if needed, attaches (Ctrl-\ detaches)
 dpty ls                                              # all sessions, running / exited / lost
+dpty browse                                          # interactive session browser (also: dpty, dpty ui)
 dpty attach work        dpty screen work        dpty logs work        dpty history work
 dpty send work "npm test"        dpty send work -k ctrl-c        dpty wait work "passed" --timeout 60
 dpty restart work       dpty kill work -s TERM  dpty rm work    dpty events
@@ -14,6 +15,20 @@ dpty stop               # stop the daemon; sessions keep running (dpty stop --se
 dpty install            # run at login, restart on exit (launchd / systemd --user)
 dpty mcp                # MCP over stdio;  dpty mcp --http 127.0.0.1:7979  for streamable HTTP + SSE
 ```
+
+In the session browser the left side lists sessions and the right side shows the selected session's details and a live preview of its screen (it is a copy: nothing is attached or resized). Arrow keys or `j`/`k` select, Enter attaches, and `Ctrl-\` detaches back to the browser. `/` searches names, titles and directories as you type, and after a short pause also every session's output, typed commands and claude/codex transcripts, showing the line that matched. For an exited or lost session, Enter shows its last screen and `r` restarts it.
+
+| Key | Does |
+|---|---|
+| Enter | attach (running) or show the last screen (ended) |
+| `/` | search; Esc clears |
+| `n` | new session (type a command, empty for a shell) |
+| `l` | output so far |
+| `s` | stop, after confirmation; history is kept |
+| `r` | restart an ended session |
+| `R` | rename |
+| `d` | delete the session and its history, after confirmation |
+| `q` | quit |
 
 ## How durability works
 
@@ -27,6 +42,7 @@ to 8 MB, in order, with no repeats) and carries on. `dpty stop` leaves sessions 
 | Daemon crashes, restarts or is upgraded | The programs keep running with the same pids. The new daemon reattaches and catches up. |
 | Reboot / logout (the programs are gone) | Sessions and history survive. On the next start, agent sessions are relaunched with their resume command and shells come back in the directory they were last in, with scrollback replayed. |
 | Agent sessions | claude gets `--session-id <uuid>` at launch (so the id is known immediately); codex ids are found by scanning `~/.codex/sessions`. After a reboot: `claude --resume <id>`, `codex resume <id>`, original prompt dropped, other flags kept. If a resume fails straight away, a fresh conversation is started instead of looping. Other agents: `--kind` / `--resume-cmd "grok --resume {id}"`. A hook can report ids: `dpty tag-agent "$DPTY_SESSION" <id>`. |
+| Session titles | When a program sets the terminal title (claude and codex do this with the thread name), it is stored as the session's `title` and shown in `dpty ls` / `pty_list`, with a `title` event on each change. `name` stays as you set it. |
 | Crash loop | At most 5 automatic restarts per 60 s, then it gives up and records `restart-loop`. |
 
 Not possible: keeping a program alive through a reboot or a killed shim. History, directory and agent resume are what survive.
@@ -37,11 +53,14 @@ Not possible: keeping a program alive through a reboot or a killed shim. History
 * **HTTP** (default `127.0.0.1:7878`, bearer token from `dpty token`, `--no-http` to disable):
   `POST /rpc`, `GET /ws?id=&cols=&rows=&token=` (binary = terminal bytes, text = JSON control `{"type":"resize",…}`),
   `POST /mcp` (streamable HTTP), `GET /sse` + `POST /messages` (legacy SSE), `GET /health`.
-* **MCP tools**: `pty_list pty_new pty_send pty_screen pty_logs pty_wait pty_history pty_restart pty_kill`.
+* **MCP tools**: `pty_list pty_new pty_send pty_screen pty_logs pty_wait pty_history pty_search pty_restart pty_kill`.
 
 ## Data
 
 `~/.durable-pty/` (override with `DPTY_HOME`): `dpty.db` (sessions, 16 MB output per session, commands, events), `token`, `dpty.log`. All 0600/0700.
+Output stored by an older version is indexed once, in the background, the first time the new daemon starts. Output is also kept as plain text lines for search (`dpty` browser `/`, RPC `search`, MCP `pty_search`), covering the same span as the stored output.
+The stored environment is never returned by `list`/`get`/`pty_list`; they give the variable names only.
+Nothing is deleted automatically. To have it tidy up, set `DPTY_IDLE_SHELL_SECS` (remove a running shell that is idle, unattached and has nothing running in it) and/or `DPTY_EXITED_KEEP_SECS` (remove a shell or process session that long after it ended) in the daemon's environment. Agent sessions and anything labelled `keep` are never removed.
 Typed commands are not recorded while the terminal has echo off (passwords) or a full-screen app is up.
 Session environment (PATH, HOME, locale, agent API variables, plus `-e` values) is stored so recovery can relaunch; `--env-all` passes everything.
 

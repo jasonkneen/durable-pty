@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   restart TEXT NOT NULL, status TEXT NOT NULL, exit_code INTEGER, pid INTEGER, cols INTEGER NOT NULL,
   rows INTEGER NOT NULL, created_ms INTEGER NOT NULL, started_ms INTEGER NOT NULL, ended_ms INTEGER,
   last_active_ms INTEGER NOT NULL, restarts INTEGER NOT NULL DEFAULT 0, last_screen BLOB, live_cwd TEXT,
-  shim_consumed INTEGER NOT NULL DEFAULT 0, screen_offset INTEGER NOT NULL DEFAULT 0
+  shim_consumed INTEGER NOT NULL DEFAULT 0, screen_offset INTEGER NOT NULL DEFAULT 0, title TEXT
 );
 CREATE TABLE IF NOT EXISTS output (
   session_id TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL, data BLOB NOT NULL,
@@ -26,13 +26,29 @@ CREATE INDEX IF NOT EXISTS commands_session ON commands(session_id, id);
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, session_id TEXT, kind TEXT NOT NULL, detail TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS lines (
+  id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, ts INTEGER NOT NULL, text TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS lines_session ON lines(session_id, id);
+CREATE VIRTUAL TABLE IF NOT EXISTS lines_fts USING fts5(text, content='lines', content_rowid='id', tokenize='trigram');
+CREATE TRIGGER IF NOT EXISTS lines_ai AFTER INSERT ON lines BEGIN
+  INSERT INTO lines_fts(rowid, text) VALUES (new.id, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS lines_ad AFTER DELETE ON lines BEGIN
+  INSERT INTO lines_fts(lines_fts, rowid, text) VALUES ('delete', old.id, old.text);
+END;
 "#;
+
+/// One piece of session output on its way to storage: session id, sequence number, timestamp, bytes, and the helper's
+/// stream offset just past them (None for text the daemon wrote itself).
+pub type OutChunk = (String, i64, i64, Vec<u8>, Option<u64>);
 
 pub struct Db {
     conn: Mutex<Connection>,
 }
 
-const COLS: &str = "id,name,cmd,args,cwd,env,labels,kind,agent_session_id,resume_cmd,restart,status,exit_code,pid,cols,rows,created_ms,started_ms,ended_ms,last_active_ms,restarts,live_cwd";
+const COLS: &str = "id,name,cmd,args,cwd,env,labels,kind,agent_session_id,resume_cmd,restart,status,exit_code,pid,cols,rows,created_ms,started_ms,ended_ms,last_active_ms,restarts,live_cwd,title";
 
 fn row_to_session(r: &Row) -> rusqlite::Result<SessionRow> {
     let json = |i: usize| -> rusqlite::Result<String> { r.get(i) };
@@ -59,6 +75,7 @@ fn row_to_session(r: &Row) -> rusqlite::Result<SessionRow> {
         last_active_ms: r.get(19)?,
         restarts: r.get::<_, i64>(20)? as u32,
         live_cwd: r.get(21)?,
+        title: r.get(22)?,
     })
 }
 
@@ -78,6 +95,10 @@ impl Db {
         if !has_offsets {
             c.execute_batch("ALTER TABLE sessions ADD COLUMN shim_consumed INTEGER NOT NULL DEFAULT 0; ALTER TABLE sessions ADD COLUMN screen_offset INTEGER NOT NULL DEFAULT 0;")?;
         }
+        let has_title: bool = c.prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name='title'")?.exists([])?;
+        if !has_title {
+            c.execute_batch("ALTER TABLE sessions ADD COLUMN title TEXT")?;
+        }
         Ok(Db { conn: Mutex::new(c) })
     }
 
@@ -87,14 +108,14 @@ impl Db {
 
     pub fn upsert_session(&self, s: &SessionRow) -> Result<()> {
         self.c().execute(
-            &format!("INSERT INTO sessions ({COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)
+            &format!("INSERT INTO sessions ({COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)
              ON CONFLICT(id) DO UPDATE SET name=?2,cmd=?3,args=?4,cwd=?5,env=?6,labels=?7,kind=?8,agent_session_id=?9,resume_cmd=?10,
-             restart=?11,status=?12,exit_code=?13,pid=?14,cols=?15,rows=?16,started_ms=?18,ended_ms=?19,last_active_ms=?20,restarts=?21,live_cwd=?22"),
+             restart=?11,status=?12,exit_code=?13,pid=?14,cols=?15,rows=?16,started_ms=?18,ended_ms=?19,last_active_ms=?20,restarts=?21,live_cwd=?22,title=?23"),
             params![
                 s.id, s.name, s.cmd, serde_json::to_string(&s.args)?, s.cwd, serde_json::to_string(&s.env)?,
                 serde_json::to_string(&s.labels)?, s.kind, s.agent_session_id, s.resume_cmd, s.restart, s.status,
                 s.exit_code, s.pid.map(|p| p as i64), s.cols as i64, s.rows as i64, s.created_ms, s.started_ms,
-                s.ended_ms, s.last_active_ms, s.restarts as i64, s.live_cwd
+                s.ended_ms, s.last_active_ms, s.restarts as i64, s.live_cwd, s.title
             ],
         )?;
         Ok(())
@@ -116,7 +137,93 @@ impl Db {
         c.execute("DELETE FROM sessions WHERE id=?1", [id])?;
         c.execute("DELETE FROM output WHERE session_id=?1", [id])?;
         c.execute("DELETE FROM commands WHERE session_id=?1", [id])?;
+        c.execute("DELETE FROM lines WHERE session_id=?1", [id])?;
         Ok(())
+    }
+
+    /// Session ids matching a key: an exact id, else an exact name, else an id prefix.
+    pub fn find_ids(&self, key: &str) -> Result<Vec<String>> {
+        let c = self.c();
+        for sql in ["SELECT id FROM sessions WHERE id=?1", "SELECT id FROM sessions WHERE name=?1", "SELECT id FROM sessions WHERE substr(id,1,length(?1))=?1"] {
+            let mut st = c.prepare_cached(sql)?;
+            let ids = st.query_map([key], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            if !ids.is_empty() {
+                return Ok(ids);
+            }
+        }
+        Ok(vec![])
+    }
+
+    pub fn name_taken(&self, name: &str, except_id: &str) -> Result<bool> {
+        Ok(self.c().prepare_cached("SELECT 1 FROM sessions WHERE name=?1 AND id<>?2")?.exists(params![name, except_id])?)
+    }
+
+    pub fn meta(&self, key: &str) -> Option<String> {
+        self.c().query_row("SELECT value FROM meta WHERE key=?1", [key], |r| r.get(0)).optional().ok().flatten()
+    }
+
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.c().execute("INSERT INTO meta (key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=?2", params![key, value])?;
+        Ok(())
+    }
+
+    /// Sessions that have stored output but nothing in the search index (output stored before the index existed).
+    pub fn unindexed_sessions(&self) -> Result<Vec<String>> {
+        let c = self.c();
+        let mut st = c.prepare("SELECT id FROM sessions s WHERE EXISTS (SELECT 1 FROM output o WHERE o.session_id=s.id) AND NOT EXISTS (SELECT 1 FROM lines l WHERE l.session_id=s.id)")?;
+        let ids = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(ids)
+    }
+
+    /// A page of a session's stored output in order, after `after_seq`: (seq, ts, bytes).
+    pub fn output_page(&self, id: &str, after_seq: i64, limit: i64) -> Result<Vec<(i64, i64, Vec<u8>)>> {
+        let c = self.c();
+        let mut st = c.prepare_cached("SELECT seq, ts, data FROM output WHERE session_id=?1 AND seq>?2 ORDER BY seq LIMIT ?3")?;
+        let rows = st.query_map(params![id, after_seq, limit], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Plain-text lines of output, for searching.
+    pub fn append_lines(&self, lines: &[(String, i64, String)]) -> Result<()> {
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        {
+            let mut st = tx.prepare_cached("INSERT INTO lines (session_id,ts,text) VALUES (?1,?2,?3)")?;
+            for (id, ts, text) in lines {
+                st.execute(params![id, ts, text])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Output lines and typed commands containing `query` (case-insensitive), newest first: (session, source, ts, text).
+    pub fn search(&self, query: &str, limit: i64) -> Result<Vec<(String, &'static str, i64, String)>> {
+        let c = self.c();
+        let mut out = vec![];
+        let like = format!("%{}%", query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+        {
+            let mut st = c.prepare_cached("SELECT session_id, ts, text FROM commands WHERE text LIKE ?1 ESCAPE '\\' ORDER BY id DESC LIMIT ?2")?;
+            for r in st.query_map(params![like, limit], |r| Ok((r.get(0)?, "command", r.get(1)?, r.get(2)?)))? {
+                out.push(r?);
+            }
+        }
+        if query.chars().count() >= 3 {
+            // The trigram index matches a quoted phrase as a substring.
+            let phrase = format!("\"{}\"", query.replace('"', "\"\""));
+            let mut st = c.prepare_cached(
+                "SELECT l.session_id, l.ts, l.text FROM lines_fts f JOIN lines l ON l.id = f.rowid WHERE lines_fts MATCH ?1 ORDER BY f.rowid DESC LIMIT ?2",
+            )?;
+            for r in st.query_map(params![phrase, limit], |r| Ok((r.get(0)?, "output", r.get(1)?, r.get(2)?)))? {
+                out.push(r?);
+            }
+        } else {
+            let mut st = c.prepare_cached("SELECT session_id, ts, text FROM lines WHERE text LIKE ?1 ESCAPE '\\' ORDER BY id DESC LIMIT ?2")?;
+            for r in st.query_map(params![like, limit], |r| Ok((r.get(0)?, "output", r.get(1)?, r.get(2)?)))? {
+                out.push(r?);
+            }
+        }
+        Ok(out)
     }
 
     /// Stores the screen snapshot together with how far into the shim's output it reflects.
@@ -149,7 +256,7 @@ impl Db {
             .unwrap_or_default())
     }
 
-    pub fn append_output(&self, batch: &[(String, i64, i64, Vec<u8>, Option<u64>)]) -> Result<()> {
+    pub fn append_output(&self, batch: &[OutChunk]) -> Result<()> {
         let mut c = self.c();
         let tx = c.transaction()?;
         {
@@ -206,6 +313,8 @@ impl Db {
                WHERE s > ?2 ORDER BY seq DESC LIMIT 1), -1)",
             params![id, cap],
         )?;
+        // The search index covers the same span as the stored output.
+        self.c().execute("DELETE FROM lines WHERE session_id=?1 AND ts < COALESCE((SELECT MIN(ts) FROM output WHERE session_id=?1), 0)", [id])?;
         Ok(())
     }
 

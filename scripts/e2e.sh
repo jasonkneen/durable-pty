@@ -16,6 +16,7 @@ start_daemon() { "$BIN" serve --http 127.0.0.1:0 >"$DPTY_HOME/daemon.$1.out" 2>&
 cat > "$FAKE/claude" <<SH
 #!/bin/sh
 echo "\$@" >> "$DPTY_HOME/claude-args.log"
+case "\$*" in *--resume*) [ -e "$DPTY_HOME/fail-resume" ] && { echo "No conversation found"; exit 1; };; esac
 echo "fake claude up: \$@"
 exec sleep 300
 SH
@@ -23,6 +24,9 @@ chmod +x "$FAKE/claude"
 
 start_daemon 1
 check "daemon socket up" '[ -S "$DPTY_HOME/dpty.sock" ]'
+
+"$BIN" serve --no-http >"$DPTY_HOME/second.out" 2>&1; SECOND=$?
+check "a second daemon for the same home refuses to start" '[ $SECOND != 0 ] && grep -q "already running" "$DPTY_HOME/second.out" && kill -0 $DAEMON'
 
 echo "# sessions"
 ID=$("$BIN" new -d -n echoer -l card=7 -- sh -c 'echo hello-world; read x; echo got:$x; sleep 300')
@@ -34,12 +38,17 @@ check "screen has text" '"$BIN" screen echoer | grep -q got:typed-line'
 check "logs strip ansi" '"$BIN" logs echoer | grep -q hello-world'
 check "history records command" '"$BIN" history echoer | grep -q typed-line'
 check "label filter" '"$BIN" ls --json -l card=7 | grep -q echoer'
+check "search finds text a session printed" 'sleep 0.6; printf "%s\n" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pty_search\",\"arguments\":{\"query\":\"LLO-WOR\"}}}" | "$BIN" mcp | grep -q "hello-world"'
+check "search finds a typed command" 'printf "%s\n" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pty_search\",\"arguments\":{\"query\":\"typed-li\"}}}" | "$BIN" mcp | grep -q "command"'
 check "label filter excludes" '! "$BIN" ls --json -l card=8 | grep -q echoer'
 check "each session has its own helper process" '[ "$(pgrep -f "dpty shim $DPTY_HOME" | wc -l | tr -d " ")" -ge 4 ] || [ "$(pgrep -f "dpty shim $DPTY_HOME" | wc -l | tr -d " ")" -ge 1 ]'
 
 echo "# a daemon crash does not touch running processes"
 "$BIN" new -d -n ticker -- sh -c 'i=0; while true; do i=$((i+1)); echo tick-$i; sleep 0.5; done' >/dev/null
-CID=$("$BIN" new -d -n agent -C /tmp -- claude "build the thing" --dangerously-skip-permissions)
+CID=$(ANTHROPIC_API_KEY=sk-e2e-secret "$BIN" new -d -n agent -C /tmp -- claude "build the thing" --dangerously-skip-permissions)
+CREATED_AT=$(date +%s)
+check "session environment values are not handed out" '! "$BIN" ls --json | grep -q sk-e2e-secret && "$BIN" ls --json | grep -q ANTHROPIC_API_KEY'
+check "nor through the MCP list tool" '! printf "%s\n" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pty_list\",\"arguments\":{}}}" | "$BIN" mcp | grep -q sk-e2e-secret'
 "$BIN" new -d -n walker -C /tmp -- sh >/dev/null
 sleep 1
 "$BIN" send walker "cd /usr && echo ARRIVED"; "$BIN" wait walker ARRIVED --timeout 5 >/dev/null
@@ -92,6 +101,14 @@ check "shell session is lost, not restarted" '"$BIN" ls | grep echoer | grep -q 
 check "restarted shell starts in its last directory" '"$BIN" screen walker | grep -q "^/usr"'
 check "history survives the reboot" '"$BIN" logs echoer | grep -q hello-world'
 
+echo "# output stored before the search index existed gets indexed"
+kill -9 $DAEMON; wait $DAEMON 2>/dev/null
+python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1],timeout=10); c.execute("DELETE FROM lines"); c.execute("DELETE FROM meta"); c.commit()' "$DPTY_HOME/dpty.db"
+start_daemon 4b
+sleep 1.5
+check "old output is searchable after an upgrade" 'printf "%s\n" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pty_search\",\"arguments\":{\"query\":\"hello-wor\"}}}" | "$BIN" mcp | grep -q "output"'
+check "printing into a closed pipe ends quietly" '! "$BIN" ls 2>&1 | head -1 | grep -q panicked && ! { "$BIN" ls | true; } 2>&1 | grep -q panicked'
+
 echo "# mcp (stdio)"
 OUT=$(printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}' \
@@ -103,7 +120,7 @@ check "mcp lists tools" 'echo "$OUT" | grep -q pty_send'
 check "mcp pty_screen returns screen" 'echo "$OUT" | grep -q hello-world'
 
 echo "# http"
-HTTP=$(grep -o 'http://[0-9.:]*' "$DPTY_HOME/daemon.4.out" | head -1)
+HTTP=$(grep -o 'http://[0-9.:]*' "$DPTY_HOME/daemon.4b.out" | head -1)
 TOKEN=$("$BIN" token)
 check "health is open" 'curl -sf "$HTTP/health" | grep -q ok'
 check "rpc needs token" '[ "$(curl -s -o /dev/null -w %{http_code} -X POST "$HTTP/rpc" -d "{}")" = 401 ]'
@@ -117,6 +134,28 @@ VID=$("$BIN" ls --json | python3 -c "import sys,json;print([s for s in json.load
 pkill -9 -f "dpty shim $DPTY_HOME/shims/$VID"
 sleep 1.2
 check "status is lost, not a made-up exit code" '"$BIN" ls | grep vanish | grep -q lost'
+
+echo "# a daemon that stalls is reconnected, not mistaken for a dead session"
+"$BIN" new -d -n noisy --restart on-failure -- sh -c 'while :; do echo nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn; done' >/dev/null
+sleep 1
+P_NOISY=$(pid_of noisy)
+kill -STOP $DAEMON; sleep 12; kill -CONT $DAEMON; sleep 3
+check "same process after the stall" '[ "$(pid_of noisy)" = "$P_NOISY" ] && "$BIN" ls | grep noisy | grep -q running'
+check "it was reconnected, not restarted" '"$BIN" events noisy | grep -q reconnected && ! "$BIN" events noisy | grep -q restarting'
+check "exactly one copy of the program" '[ "$(pgrep -f "echo nnnnnnnnnnnnnnnn" | wc -l | tr -d " ")" = 1 ]'
+"$BIN" rm noisy
+
+echo "# a resume that fails long after the session was created starts a fresh conversation"
+touch "$DPTY_HOME/fail-resume"
+while [ $(( $(date +%s) - CREATED_AT )) -lt 22 ]; do sleep 1; done
+kill -9 $DAEMON; wait $DAEMON 2>/dev/null; pkill -9 -f "dpty shim $DPTY_HOME"
+sleep 1
+start_daemon 5
+for _ in $(seq 80); do "$BIN" events agent | grep -q resume-failed && break; sleep 0.1; done
+sleep 1.5
+check "resume failure is noticed" '"$BIN" events agent | grep -q resume-failed'
+check "no restart loop" '! "$BIN" events agent | grep -q restart-loop'
+check "agent is running again with a new conversation id" '"$BIN" ls | grep agent | grep -q running && tail -1 "$DPTY_HOME/claude-args.log" | grep -q -- "--session-id" && ! tail -1 "$DPTY_HOME/claude-args.log" | grep -q "$AGENT_ID"'
 
 echo "# stop --sessions ends everything"
 "$BIN" stop --sessions >/dev/null; sleep 1

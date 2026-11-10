@@ -56,7 +56,8 @@ async fn attach(mgr: Arc<Manager>, mut reader: BufReader<tokio::net::unix::Owned
     let key = req.params.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let cols = req.params.get("cols").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
     let rows = req.params.get("rows").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
-    let (live, snap, mut rx) = match mgr.attach(&key, cols, rows) {
+    let history = req.params.get("history").and_then(|v| v.as_bool()).unwrap_or(false);
+    let (live, snap, mut rx) = match mgr.attach(&key, cols, rows, history) {
         Ok(x) => x,
         Err(e) => {
             let _ = write_resp(&mut w, Response::from(req.id, Err(e.to_string()))).await;

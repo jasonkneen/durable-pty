@@ -30,6 +30,8 @@ pub const S_EXIT: u8 = 2; // i32
 pub const S_ECHO: u8 = 3; // u8
 
 const RING_CAP: usize = 8 * 1024 * 1024;
+/// The ring is cut back to RING_CAP only once it passes this, so a busy program does not shift 8 MB on every read.
+const RING_HIGH: usize = 12 * 1024 * 1024;
 const LINGER_AFTER_EXIT: Duration = Duration::from_secs(7 * 24 * 3600);
 
 #[derive(Serialize, Deserialize)]
@@ -64,6 +66,8 @@ struct Inner {
     base: u64,
     total: u64,
     client: Option<UnixStream>,
+    /// Bumped for each daemon connection, so a finished connection never clears a newer one.
+    client_gen: u64,
     exited: Option<i32>,
     exited_at: Option<Instant>,
     echo: bool,
@@ -87,13 +91,11 @@ fn echo_on(master: &(dyn MasterPty + Send)) -> bool {
 
 /// Writes a frame to the connected daemon, dropping the client if it cannot keep up or is gone.
 fn send(inner: &mut Inner, t: u8, payload: &[u8]) {
-    if let Some(c) = inner.client.as_mut() {
-        if write_frame_blocking(c, t, payload).is_err() {
-            if let Some(c) = inner.client.take() {
+    if let Some(c) = inner.client.as_mut()
+        && write_frame_blocking(c, t, payload).is_err()
+            && let Some(c) = inner.client.take() {
                 let _ = c.shutdown(std::net::Shutdown::Both);
             }
-        }
-    }
 }
 
 pub fn run(spec_file: &str) -> anyhow::Result<()> {
@@ -148,6 +150,7 @@ fn run_spec(spec: ShimSpec) -> anyhow::Result<()> {
         base: 0,
         total: 0,
         client: None,
+        client_gen: 0,
         exited: None,
         exited_at: None,
         echo: true,
@@ -173,7 +176,7 @@ fn run_spec(spec: ShimSpec) -> anyhow::Result<()> {
                 let start = g.total;
                 g.ring.extend_from_slice(&buf[..n]);
                 g.total += n as u64;
-                if g.ring.len() > RING_CAP {
+                if g.ring.len() > RING_HIGH {
                     let cut = g.ring.len() - RING_CAP;
                     g.ring.drain(..cut);
                     g.base += cut as u64;
@@ -254,6 +257,7 @@ fn serve(
     let Ok(out) = stream.try_clone() else { return };
     let _ = out.set_write_timeout(Some(Duration::from_secs(10)));
 
+    let my_gen;
     {
         let mut g = lock(&inner);
         // A newer daemon connection replaces an older one.
@@ -261,6 +265,8 @@ fn serve(
             let _ = old.shutdown(std::net::Shutdown::Both);
         }
         g.client = Some(out);
+        g.client_gen += 1;
+        my_gen = g.client_gen;
         let mut ack = Vec::new();
         ack.extend_from_slice(&g.base.to_be_bytes());
         ack.extend_from_slice(&g.total.to_be_bytes());
@@ -325,7 +331,9 @@ fn serve(
             Err(_) => {
                 // The daemon went away: keep the session running and wait for the next one.
                 let mut g = lock(&inner);
-                g.client = None;
+                if g.client_gen == my_gen {
+                    g.client = None;
+                }
                 return;
             }
         }

@@ -110,11 +110,10 @@ async fn sse_message(State(app): State<App>, Query(q): Query<HashMap<String, Str
     let sessions = app.sse.clone();
     let id = id.clone();
     tokio::spawn(async move {
-        if let Some(r) = mcp::handle(&*backend, body).await {
-            if tx.send(r.to_string()).await.is_err() {
+        if let Some(r) = mcp::handle(&*backend, body).await
+            && tx.send(r.to_string()).await.is_err() {
                 sessions.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
             }
-        }
     });
     StatusCode::ACCEPTED.into_response()
 }
@@ -129,7 +128,7 @@ async fn ws_upgrade(State(app): State<App>, Query(q): Query<HashMap<String, Stri
 
 /// Text frames carry JSON control ({"type":"resize","cols":..,"rows":..}); binary frames are raw terminal bytes both ways.
 async fn ws_session(mgr: Arc<Manager>, mut socket: WebSocket, key: String, cols: u16, rows: u16) {
-    let (live, snap, mut rx) = match mgr.attach(&key, cols, rows) {
+    let (live, snap, mut rx) = match mgr.attach(&key, cols, rows, false) {
         Ok(x) => x,
         Err(e) => {
             let _ = socket.send(Message::Text(json!({"type": "error", "message": e.to_string()}).to_string().into())).await;
