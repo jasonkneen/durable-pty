@@ -6,6 +6,8 @@ versions follow [Semantic Versioning](https://semver.org/). Notes under "Unrelea
 
 ## Unreleased
 
+## 0.2.0 (2026-11-14)
+
 - Session browser: the right-hand side now shows a live preview of the selected session's screen, in colour, without attaching to it or resizing it. `/` search also looks inside every session's output, typed commands and claude/codex transcripts, including output stored before this version (indexed once in the background), and shows the matching line. New keys: `n` start a session, `R` rename, `d` delete (asks first). The output view scrolls correctly, stops at the end and follows new output; a session that has ended opens on its last screen. The list no longer reorders itself as sessions produce output.
 - Session browser: the side panel is now a working terminal. `Tab` (or a click on the preview) gives it the keyboard: typing, paste and the mouse go to the selected session, its cursor is shown, and `Ctrl-\` (or a click elsewhere) gives the keyboard back to the list. The session is resized to the panel, as a full attach resizes it to the window. Shift-PageUp/PageDown or the wheel scroll back through its history. `Enter` opens it in the whole window.
 - Session browser: mouse support. Drag the line between the list and the right-hand side, or between details and the preview, to resize them; the sizes are remembered. Click a session to select it; the wheel moves through the list and scrolls the output view. Selecting text with the mouse now needs the terminal's own override (usually Shift-drag, Option-drag on macOS).
