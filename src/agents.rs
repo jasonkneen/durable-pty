@@ -29,15 +29,65 @@ fn looks_like_id(s: &str) -> bool {
 }
 
 const CLAUDE_VALUE_FLAGS: &[&str] = &[
-    "--model", "--permission-mode", "--add-dir", "--allowedTools", "--allowed-tools", "--disallowedTools", "--disallowed-tools",
-    "--mcp-config", "--append-system-prompt", "--system-prompt", "--settings", "--agent", "--max-turns", "--output-format",
-    "--input-format", "--fallback-model", "--plugin-dir", "--effort", "--session-id", "--resume", "-r", "--name", "-n",
+    "--model",
+    "--permission-mode",
+    "--add-dir",
+    "--allowedTools",
+    "--allowed-tools",
+    "--disallowedTools",
+    "--disallowed-tools",
+    "--mcp-config",
+    "--append-system-prompt",
+    "--system-prompt",
+    "--settings",
+    "--agent",
+    "--max-turns",
+    "--output-format",
+    "--input-format",
+    "--fallback-model",
+    "--plugin-dir",
+    "--effort",
+    "--session-id",
+    "--resume",
+    "-r",
+    "--name",
+    "-n",
 ];
 const GROK_VALUE_FLAGS: &[&str] = &[
-    "-m", "--model", "--agent", "--agents", "--allow", "--deny", "--cwd", "--permission-mode", "--rules", "--reasoning-effort",
-    "--max-turns", "-s", "--session-id", "-r", "--resume", "--debug-file", "--output-format",
+    "-m",
+    "--model",
+    "--agent",
+    "--agents",
+    "--allow",
+    "--deny",
+    "--cwd",
+    "--permission-mode",
+    "--rules",
+    "--reasoning-effort",
+    "--max-turns",
+    "-s",
+    "--session-id",
+    "-r",
+    "--resume",
+    "--debug-file",
+    "--output-format",
 ];
-const CODEX_VALUE_FLAGS: &[&str] = &["-m", "--model", "-c", "--config", "-C", "--cd", "-s", "--sandbox", "-a", "--ask-for-approval", "-p", "--profile", "-i", "--image"];
+const CODEX_VALUE_FLAGS: &[&str] = &[
+    "-m",
+    "--model",
+    "-c",
+    "--config",
+    "-C",
+    "--cd",
+    "-s",
+    "--sandbox",
+    "-a",
+    "--ask-for-approval",
+    "-p",
+    "--profile",
+    "-i",
+    "--image",
+];
 
 /// Drops the initial prompt (a positional first or last argument) so a resume does not resend it.
 fn drop_prompt(args: Vec<String>, value_flags: &[&str]) -> Vec<String> {
@@ -86,10 +136,9 @@ pub fn prepare(row: &mut SessionRow) {
             row.args.insert(0, "--session-id".into());
             row.agent_session_id = Some(id);
         }
-        "codex"
-            if row.args.first().map(String::as_str) == Some("resume") => {
-                row.agent_session_id = row.args.get(1).filter(|v| looks_like_id(v)).cloned();
-            }
+        "codex" if row.args.first().map(String::as_str) == Some("resume") => {
+            row.agent_session_id = row.args.get(1).filter(|v| looks_like_id(v)).cloned();
+        }
         _ => {}
     }
 }
@@ -112,13 +161,12 @@ pub fn forget_resume(row: &mut SessionRow) -> bool {
             }
             row.args = rest;
         }
-        "codex"
-            if row.args.first().map(String::as_str) == Some("resume") => {
+        "codex" if row.args.first().map(String::as_str) == Some("resume") => {
+            row.args.remove(0);
+            if row.args.first().is_some_and(|v| looks_like_id(v)) {
                 row.args.remove(0);
-                if row.args.first().is_some_and(|v| looks_like_id(v)) {
-                    row.args.remove(0);
-                }
             }
+        }
         _ => {}
     }
     row.agent_session_id = None;
@@ -128,7 +176,9 @@ pub fn forget_resume(row: &mut SessionRow) -> bool {
 
 /// Rewrites cmd/args so the next launch continues the previous agent conversation. Returns whether it did.
 pub fn resume(row: &mut SessionRow) -> bool {
-    let Some(id) = row.agent_session_id.clone() else { return false };
+    let Some(id) = row.agent_session_id.clone() else {
+        return false;
+    };
     if let Some(tpl) = row.resume_cmd.clone() {
         let line = tpl.replace("{id}", &id);
         let mut parts = shell_split(&line);
@@ -159,7 +209,14 @@ pub fn resume(row: &mut SessionRow) -> bool {
                 i += 1;
             }
             let mut args = vec!["--resume".to_string(), id];
-            args.extend(drop_prompt(rest, if grok { GROK_VALUE_FLAGS } else { CLAUDE_VALUE_FLAGS }));
+            args.extend(drop_prompt(
+                rest,
+                if grok {
+                    GROK_VALUE_FLAGS
+                } else {
+                    CLAUDE_VALUE_FLAGS
+                },
+            ));
             row.args = args;
             true
         }
@@ -221,11 +278,16 @@ fn mtime_ms(p: &Path) -> i64 {
 }
 
 fn canon(p: &str) -> String {
-    std::fs::canonicalize(p).map(|c| c.to_string_lossy().into_owned()).unwrap_or_else(|_| p.to_string())
+    std::fs::canonicalize(p)
+        .map(|c| c.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| p.to_string())
 }
 
 pub fn claude_project_dir(cwd: &str) -> PathBuf {
-    let enc: String = canon(cwd).chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let enc: String = canon(cwd)
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
     home().join(".claude").join("projects").join(enc)
 }
 
@@ -233,7 +295,9 @@ pub fn claude_project_dir(cwd: &str) -> PathBuf {
 pub fn transcript_path(row: &SessionRow) -> Option<PathBuf> {
     let id = row.agent_session_id.as_deref()?;
     match row.kind.as_str() {
-        "claude" => Some(claude_project_dir(&row.cwd).join(format!("{id}.jsonl"))).filter(|p| p.is_file()),
+        "claude" => {
+            Some(claude_project_dir(&row.cwd).join(format!("{id}.jsonl"))).filter(|p| p.is_file())
+        }
         "codex" => find_codex_transcript(&home().join(".codex").join("sessions"), id),
         _ => None,
     }
@@ -244,14 +308,19 @@ fn find_codex_transcript(root: &Path, id: &str) -> Option<PathBuf> {
     let suffix = format!("{id}.jsonl");
     let mut stack = vec![(root.to_path_buf(), 0)];
     while let Some((dir, depth)) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for e in rd.flatten() {
             let p = e.path();
             if p.is_dir() {
                 if depth < 4 {
                     stack.push((p, depth + 1));
                 }
-            } else if p.file_name().is_some_and(|n| n.to_string_lossy().ends_with(&suffix)) {
+            } else if p
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().ends_with(&suffix))
+            {
                 return Some(p);
             }
         }
@@ -274,7 +343,10 @@ pub fn scan(row: &SessionRow, claimed: &HashSet<String>) -> Option<String> {
                 }
                 let id = p.file_stem()?.to_string_lossy().into_owned();
                 let m = mtime_ms(&p);
-                if m >= since && !claimed.contains(&id) && best.as_ref().is_none_or(|(bm, _)| m > *bm) {
+                if m >= since
+                    && !claimed.contains(&id)
+                    && best.as_ref().is_none_or(|(bm, _)| m > *bm)
+                {
                     best = Some((m, id));
                 }
             }
@@ -285,7 +357,9 @@ pub fn scan(row: &SessionRow, claimed: &HashSet<String>) -> Option<String> {
             let mut best: Option<(i64, String)> = None;
             let mut stack = vec![(home().join(".codex").join("sessions"), 0)];
             while let Some((dir, depth)) = stack.pop() {
-                let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+                let Ok(rd) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
                 for e in rd.flatten() {
                     let p = e.path();
                     if p.is_dir() {
@@ -294,7 +368,10 @@ pub fn scan(row: &SessionRow, claimed: &HashSet<String>) -> Option<String> {
                         }
                         continue;
                     }
-                    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let name = p
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
                     if !(name.starts_with("rollout-") && name.ends_with(".jsonl")) {
                         continue;
                     }
@@ -302,7 +379,9 @@ pub fn scan(row: &SessionRow, claimed: &HashSet<String>) -> Option<String> {
                     if m < since || best.as_ref().is_some_and(|(bm, _)| m <= *bm) {
                         continue;
                     }
-                    let Some((id, cwd)) = codex_meta(&p) else { continue };
+                    let Some((id, cwd)) = codex_meta(&p) else {
+                        continue;
+                    };
                     if canon(&cwd) == want && !claimed.contains(&id) {
                         best = Some((m, id));
                     }
@@ -316,14 +395,21 @@ pub fn scan(row: &SessionRow, claimed: &HashSet<String>) -> Option<String> {
 
 fn codex_meta(p: &Path) -> Option<(String, String)> {
     use std::io::{BufRead, BufReader};
-    let line = BufReader::new(std::fs::File::open(p).ok()?).lines().next()?.ok()?;
+    let line = BufReader::new(std::fs::File::open(p).ok()?)
+        .lines()
+        .next()?
+        .ok()?;
     let v: serde_json::Value = serde_json::from_str(&line).ok()?;
     let pl = v.get("payload").unwrap_or(&v);
     let cwd = pl.get("cwd")?.as_str()?.to_string();
-    let id = pl.get("id").and_then(|i| i.as_str()).map(String::from).or_else(|| {
-        let n = p.file_stem()?.to_string_lossy().into_owned();
-        (n.len() >= 36).then(|| n[n.len() - 36..].to_string())
-    })?;
+    let id = pl
+        .get("id")
+        .and_then(|i| i.as_str())
+        .map(String::from)
+        .or_else(|| {
+            let n = p.file_stem()?.to_string_lossy().into_owned();
+            (n.len() >= 36).then(|| n[n.len() - 36..].to_string())
+        })?;
     Some((id, cwd))
 }
 
@@ -334,21 +420,57 @@ mod tests {
 
     fn row(kind: &str, args: &[&str]) -> SessionRow {
         SessionRow {
-            id: "i".into(), name: "n".into(), cmd: kind.into(), args: args.iter().map(|s| s.to_string()).collect(), cwd: "/tmp".into(),
-            env: BTreeMap::new(), labels: BTreeMap::new(), kind: kind.into(), agent_session_id: None, resume_cmd: None,
-            restart: "on-failure".into(), status: "running".into(), exit_code: None, pid: None, cols: 80, rows: 24,
-            created_ms: 0, started_ms: 0, ended_ms: None, last_active_ms: 0, restarts: 0, live_cwd: None, title: None,
+            id: "i".into(),
+            name: "n".into(),
+            cmd: kind.into(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            cwd: "/tmp".into(),
+            env: BTreeMap::new(),
+            labels: BTreeMap::new(),
+            kind: kind.into(),
+            agent_session_id: None,
+            resume_cmd: None,
+            restart: "on-failure".into(),
+            status: "running".into(),
+            exit_code: None,
+            pid: None,
+            cols: 80,
+            rows: 24,
+            created_ms: 0,
+            started_ms: 0,
+            ended_ms: None,
+            last_active_ms: 0,
+            restarts: 0,
+            live_cwd: None,
+            title: None,
         }
     }
 
     #[test]
     fn claude_gets_session_id_and_resumes_without_prompt() {
-        let mut r = row("claude", &["--dangerously-skip-permissions", "--model", "opus", "fix the bug"]);
+        let mut r = row(
+            "claude",
+            &[
+                "--dangerously-skip-permissions",
+                "--model",
+                "opus",
+                "fix the bug",
+            ],
+        );
         prepare(&mut r);
         let id = r.agent_session_id.clone().unwrap();
         assert_eq!(&r.args[..2], ["--session-id".to_string(), id.clone()]);
         assert!(resume(&mut r));
-        assert_eq!(r.args, ["--resume", id.as_str(), "--dangerously-skip-permissions", "--model", "opus"]);
+        assert_eq!(
+            r.args,
+            [
+                "--resume",
+                id.as_str(),
+                "--dangerously-skip-permissions",
+                "--model",
+                "opus"
+            ]
+        );
         assert!(resume(&mut r));
         assert_eq!(r.args.iter().filter(|a| *a == "--resume").count(), 1);
     }
@@ -365,7 +487,10 @@ mod tests {
         let second = r.agent_session_id.clone().unwrap();
         assert_ne!(first, second, "a new conversation gets a new id");
         assert_eq!(&r.args[..2], ["--session-id".to_string(), second]);
-        assert!(r.args.contains(&"haiku".to_string()), "other flags are kept");
+        assert!(
+            r.args.contains(&"haiku".to_string()),
+            "other flags are kept"
+        );
     }
 
     #[test]
@@ -378,14 +503,23 @@ mod tests {
         assert_eq!(r.args, ["--resume", id.as_str(), "--model", "grok-x"]);
         let mut s = row("grok", &["-s", "abc12345-0000-0000-0000-000000000000"]);
         prepare(&mut s);
-        assert_eq!(s.agent_session_id.as_deref(), Some("abc12345-0000-0000-0000-000000000000"));
+        assert_eq!(
+            s.agent_session_id.as_deref(),
+            Some("abc12345-0000-0000-0000-000000000000")
+        );
     }
 
     #[test]
     fn claude_resume_flag_is_adopted() {
-        let mut r = row("claude", &["--resume", "0b1c2d3e-aaaa-bbbb-cccc-0123456789ab"]);
+        let mut r = row(
+            "claude",
+            &["--resume", "0b1c2d3e-aaaa-bbbb-cccc-0123456789ab"],
+        );
         prepare(&mut r);
-        assert_eq!(r.agent_session_id.as_deref(), Some("0b1c2d3e-aaaa-bbbb-cccc-0123456789ab"));
+        assert_eq!(
+            r.agent_session_id.as_deref(),
+            Some("0b1c2d3e-aaaa-bbbb-cccc-0123456789ab")
+        );
     }
 
     #[test]
@@ -393,7 +527,15 @@ mod tests {
         let mut r = row("codex", &["--model", "gpt-x", "do it"]);
         r.agent_session_id = Some("019a0000-1111-2222-3333-444455556666".into());
         assert!(resume(&mut r));
-        assert_eq!(r.args, ["resume", "019a0000-1111-2222-3333-444455556666", "--model", "gpt-x"]);
+        assert_eq!(
+            r.args,
+            [
+                "resume",
+                "019a0000-1111-2222-3333-444455556666",
+                "--model",
+                "gpt-x"
+            ]
+        );
     }
 
     #[test]
@@ -405,7 +547,10 @@ mod tests {
         let file = day.join(format!("rollout-2026-11-10T00-00-00-{id}.jsonl"));
         std::fs::write(&file, "{}\n").unwrap();
         assert_eq!(find_codex_transcript(&root, id), Some(file));
-        assert_eq!(find_codex_transcript(&root, "ffffffff-0000-0000-0000-000000000000"), None);
+        assert_eq!(
+            find_codex_transcript(&root, "ffffffff-0000-0000-0000-000000000000"),
+            None
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -415,6 +560,12 @@ mod tests {
         r.agent_session_id = Some("abc12345".into());
         r.resume_cmd = Some("grok --resume {id}".into());
         assert!(resume(&mut r));
-        assert_eq!((r.cmd.as_str(), r.args.as_slice()), ("grok", ["--resume".to_string(), "abc12345".to_string()].as_slice()));
+        assert_eq!(
+            (r.cmd.as_str(), r.args.as_slice()),
+            (
+                "grok",
+                ["--resume".to_string(), "abc12345".to_string()].as_slice()
+            )
+        );
     }
 }

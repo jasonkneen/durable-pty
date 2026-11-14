@@ -1,15 +1,15 @@
 use crate::agents;
 use crate::db::Db;
 use crate::model::SessionRow;
-use crate::util::{basename, now_ms, short_id};
-use anyhow::{anyhow, bail, Result};
 use crate::proto::{read_frame, write_frame};
 use crate::shim::{self, ShimSpec};
+use crate::util::{basename, now_ms, short_id};
+use anyhow::{Result, anyhow, bail};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc as std_mpsc, Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, mpsc as std_mpsc};
 use std::time::{Duration, Instant};
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc};
@@ -53,7 +53,9 @@ impl vt100::Callbacks for TitleCb {
 /// Drops control characters and leading status glyphs (spinners, `✳`) so the title only changes when the text does.
 pub fn clean_title(raw: &str) -> Option<String> {
     let t: String = raw.chars().filter(|c| !c.is_control()).collect();
-    let t = t.trim_start_matches(|c: char| !c.is_alphanumeric()).trim_end();
+    let t = t
+        .trim_start_matches(|c: char| !c.is_alphanumeric())
+        .trim_end();
     if t.is_empty() {
         return None;
     }
@@ -120,10 +122,7 @@ impl InputTracker {
                     self.buf.pop();
                 }
                 0x03 | 0x15 => self.buf.clear(),
-                0x20..=0xff
-                    if record && self.buf.len() < 4096 => {
-                        self.buf.push(b)
-                    }
+                0x20..=0xff if record && self.buf.len() < 4096 => self.buf.push(b),
                 _ => {}
             }
         }
@@ -150,8 +149,74 @@ pub struct Live {
     removed: AtomicBool,
     /// The current launch is an attempt to resume an agent conversation.
     resuming: AtomicBool,
+    /// Process that owns the PTY. Zero until the daemon is connected to it.
+    shim_pid: AtomicU32,
     out_tx: std_mpsc::Sender<OutMsg>,
     db: Arc<Db>,
+    seats: Mutex<Seats>,
+}
+
+/// The clients attached to a session and the terminal size each has, oldest first.
+#[derive(Default)]
+struct Seats {
+    next: u64,
+    /// The session's size before the first of the current clients attached.
+    before: Option<(u16, u16)>,
+    taken: Vec<(u64, u16, u16)>,
+    /// Attached client processes, including a client that did not set a terminal size.
+    clients: Vec<(u64, u32)>,
+}
+
+/// What an attaching client gets: the session, its screen so far, the stream of what follows, and its seat.
+pub type Attached = (Arc<Live>, Vec<u8>, broadcast::Receiver<Frame>, Seat);
+
+/// One attached client's place in a session. A session has a single size, so it takes the size of whichever client
+/// attached or resized last. When that client goes, the size goes back to the client before it, or to what it was
+/// before anyone attached: looking at a session from a small panel must not leave it small for the terminal that was
+/// already showing it.
+pub struct Seat {
+    live: Arc<Live>,
+    id: u64,
+}
+
+impl Seat {
+    pub fn resize(&self, cols: u16, rows: u16) {
+        if cols == 0 || rows == 0 {
+            return;
+        }
+        {
+            let mut seats = lock(&self.live.seats);
+            seats.taken.retain(|s| s.0 != self.id);
+            seats.taken.push((self.id, cols, rows));
+        }
+        let _ = self.live.resize(cols, rows);
+    }
+}
+
+impl Drop for Seat {
+    fn drop(&mut self) {
+        let back_to = {
+            let mut seats = lock(&self.live.seats);
+            seats.clients.retain(|s| s.0 != self.id);
+            let was_last = seats.taken.last().is_some_and(|s| s.0 == self.id);
+            seats.taken.retain(|s| s.0 != self.id);
+            let size = match seats.taken.last() {
+                Some(&(_, cols, rows)) => Some((cols, rows)),
+                None => seats.before.take(),
+            };
+            // Only the client that set the current size hands it back.
+            size.filter(|_| was_last)
+        };
+        if let Some((cols, rows)) = back_to {
+            let current = {
+                let m = lock(&self.live.meta);
+                (m.cols, m.rows)
+            };
+            if current != (cols, rows) && self.live.is_running() {
+                let _ = self.live.resize(cols, rows);
+            }
+        }
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -174,7 +239,11 @@ impl Live {
     /// restart: it is only fed to the screen.
     pub fn emit_at(&self, start: u64, data: &[u8]) {
         let end = start + data.len() as u64;
-        let skip = self.consumed.load(Ordering::SeqCst).saturating_sub(start).min(data.len() as u64) as usize;
+        let skip = self
+            .consumed
+            .load(Ordering::SeqCst)
+            .saturating_sub(start)
+            .min(data.len() as u64) as usize;
         self.apply(data, skip, Some(end));
     }
 
@@ -195,7 +264,13 @@ impl Live {
                 }
                 s.seq += 1;
                 if !self.removed.load(Ordering::Relaxed) {
-                    let _ = self.out_tx.send(OutMsg::Chunk(self.id.clone(), s.seq, ts, fresh.to_vec(), end));
+                    let _ = self.out_tx.send(OutMsg::Chunk(
+                        self.id.clone(),
+                        s.seq,
+                        ts,
+                        fresh.to_vec(),
+                        end,
+                    ));
                 }
                 let _ = self.tx.send(Frame::Data(Arc::new(fresh.to_vec())));
             }
@@ -246,6 +321,20 @@ impl Live {
         (v, rx)
     }
 
+    /// Recent output exactly as it was written, from the start of a line. Empty while a full-screen program has the
+    /// alternate screen: its past output is not what is on screen.
+    pub fn raw_history(&self) -> Vec<u8> {
+        let s = lock(&self.screen);
+        if s.parser.screen().alternate_screen() {
+            return vec![];
+        }
+        let tail = &s.ring[s.ring.len().saturating_sub(256 * 1024)..];
+        match tail.iter().position(|&b| b == b'\n') {
+            Some(at) => tail[at + 1..].to_vec(),
+            None => vec![],
+        }
+    }
+
     pub fn screen_text(&self) -> String {
         lock(&self.screen).parser.screen().contents()
     }
@@ -256,8 +345,12 @@ impl Live {
 
     fn command(&self, cmd: ShimCmd) -> Result<()> {
         let l = lock(&self.link);
-        let link = l.as_ref().ok_or_else(|| anyhow!("session is not running"))?;
-        link.tx.send(cmd).map_err(|_| anyhow!("session is not running"))
+        let link = l
+            .as_ref()
+            .ok_or_else(|| anyhow!("session is not running"))?;
+        link.tx
+            .send(cmd)
+            .map_err(|_| anyhow!("session is not running"))
     }
 
     pub fn write_input(&self, data: &[u8]) -> Result<()> {
@@ -272,6 +365,35 @@ impl Live {
         Ok(())
     }
 
+    /// Takes a place in the session for a client whose terminal is `cols` x `rows` (0 when it has no size of its own).
+    /// `client` is that process, when the connection names one.
+    pub fn seat(self: &Arc<Self>, cols: u16, rows: u16, client: Option<u32>) -> Seat {
+        let id = {
+            let mut seats = lock(&self.seats);
+            if seats.taken.is_empty() {
+                let m = lock(&self.meta);
+                seats.before = Some((m.cols, m.rows)).filter(|s| s.0 > 0 && s.1 > 0);
+            }
+            seats.next += 1;
+            let id = seats.next;
+            // A client with no size of its own never decides the session's size.
+            if cols > 0 && rows > 0 {
+                seats.taken.push((id, cols, rows));
+            }
+            if let Some(pid) = client.filter(|p| *p > 0) {
+                seats.clients.push((id, pid));
+            }
+            id
+        };
+        if cols > 0 && rows > 0 {
+            let _ = self.resize(cols, rows);
+        }
+        Seat {
+            live: self.clone(),
+            id,
+        }
+    }
+
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         if cols == 0 || rows == 0 {
             bail!("invalid size");
@@ -283,7 +405,8 @@ impl Live {
             if rows < old_rows && !s.parser.screen().alternate_screen() {
                 // Shrinking cuts rows off the bottom, where a shell's prompt is. Rebuild from recent output instead, so
                 // the newest lines stay in view as they would in a real terminal. (A full-screen program redraws itself.)
-                let mut parser = vt100::Parser::new_with_callbacks(rows, cols, 0, TitleCb::default());
+                let mut parser =
+                    vt100::Parser::new_with_callbacks(rows, cols, 0, TitleCb::default());
                 parser.process(&s.ring);
                 parser.callbacks_mut().title = None;
                 s.parser = parser;
@@ -304,6 +427,7 @@ impl Live {
 
     /// Tells the shim the daemon is done with the session; it removes its files and exits.
     fn bye(&self) {
+        self.shim_pid.store(0, Ordering::Relaxed);
         if let Some(l) = lock(&self.link).take() {
             let _ = l.tx.send(ShimCmd::Bye);
         }
@@ -398,7 +522,9 @@ impl Manager {
         });
         // Output stored by a version without the search index is indexed once, in the background.
         let idb = m.db.clone();
-        let _ = std::thread::Builder::new().name("dpty-index".into()).spawn(move || index_stored_output(&idb));
+        let _ = std::thread::Builder::new()
+            .name("dpty-index".into())
+            .spawn(move || index_stored_output(&idb));
         tokio::spawn(m.clone().exit_loop(exit_rx));
         tokio::spawn(m.clone().maintenance());
         m
@@ -410,7 +536,14 @@ impl Manager {
     pub fn session_of_pid(&self, pid: u32) -> Option<String> {
         let chain = crate::util::ancestry(pid);
         let lives: Vec<_> = lock(&self.live).values().cloned().collect();
-        lives.into_iter().find(|l| lock(&l.meta).pid.is_some_and(|p| p > 0 && chain.contains(&p))).map(|l| l.id.clone())
+        lives
+            .into_iter()
+            .find(|l| {
+                lock(&l.meta)
+                    .pid
+                    .is_some_and(|p| p > 0 && chain.contains(&p))
+            })
+            .map(|l| l.id.clone())
     }
 
     pub fn resolve(&self, key: &str) -> Result<String> {
@@ -431,20 +564,33 @@ impl Manager {
 
     pub fn running(&self, key: &str) -> Result<Arc<Live>> {
         let id = self.resolve(key)?;
-        self.live(&id).filter(|l| l.is_running()).ok_or_else(|| anyhow!("session '{key}' is not running (use restart, logs or screen)"))
+        self.live(&id)
+            .filter(|l| l.is_running())
+            .ok_or_else(|| anyhow!("session '{key}' is not running (use restart, logs or screen)"))
     }
 
     pub fn row(&self, id: &str) -> Result<SessionRow> {
         if let Some(l) = self.live(id) {
             return Ok(lock(&l.meta).clone());
         }
-        self.db.get_session(id)?.ok_or_else(|| anyhow!("no such session"))
+        self.db
+            .get_session(id)?
+            .ok_or_else(|| anyhow!("no such session"))
     }
 
     pub fn describe(&self, row: SessionRow) -> Value {
-        let (running, attached) = match self.live(&row.id) {
-            Some(l) => (l.is_running(), l.tx.receiver_count()),
-            None => (false, 0),
+        let (running, attached, shim_pid, client_pids) = match self.live(&row.id) {
+            Some(l) => {
+                let clients: Vec<u32> =
+                    lock(&l.seats).clients.iter().map(|(_, pid)| *pid).collect();
+                (
+                    l.is_running(),
+                    l.tx.receiver_count(),
+                    l.shim_pid.load(Ordering::Relaxed),
+                    clients,
+                )
+            }
+            None => (false, 0, 0, Vec::new()),
         };
         let mut v = serde_json::to_value(&row).unwrap_or(Value::Null);
         // The environment holds credentials (API keys): callers, including agents over MCP, only get the variable names.
@@ -454,7 +600,47 @@ impl Manager {
         }
         v["running"] = json!(running);
         v["attached"] = json!(attached);
+        v["shim_pid"] = if shim_pid > 0 {
+            json!(shim_pid)
+        } else {
+            Value::Null
+        };
+        v["client_pids"] = json!(client_pids);
         v
+    }
+
+    /// Every running `dpty` process, classified. `skip` is the process making this request.
+    pub fn processes(&self, skip: Option<u32>) -> Vec<Value> {
+        let lives: Vec<_> = lock(&self.live).values().cloned().collect();
+        let mut shims = HashMap::new();
+        let mut clients = HashMap::new();
+        for live in lives {
+            let name = lock(&live.meta).name.clone();
+            let shim = live.shim_pid.load(Ordering::Relaxed);
+            if shim > 0 {
+                shims.insert(shim, name.clone());
+            }
+            for (_, pid) in &lock(&live.seats).clients {
+                clients.insert(*pid, name.clone());
+            }
+        }
+        crate::util::classify_dpty(
+            std::process::id(),
+            &shims,
+            &clients,
+            &crate::util::dpty_processes(),
+            skip,
+        )
+        .into_iter()
+        .map(|p| {
+            json!({
+                "pid": p.pid,
+                "role": p.role,
+                "session": if p.session.is_empty() { Value::Null } else { json!(p.session) },
+                "cmd": p.cmd,
+            })
+        })
+        .collect()
     }
 
     pub fn list(&self) -> Result<Vec<Value>> {
@@ -471,18 +657,34 @@ impl Manager {
         let id = short_id();
         let mut env = req.env;
         if !env.contains_key("PATH") {
-            env.insert("PATH".into(), std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into()));
+            env.insert(
+                "PATH".into(),
+                std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into()),
+            );
         }
         let (cmd, args) = match req.cmd {
             Some(c) => (c, req.args),
-            None => (env.get("SHELL").cloned().unwrap_or_else(|| "/bin/zsh".into()), if req.args.is_empty() { vec!["-l".into()] } else { req.args }),
+            None => (
+                env.get("SHELL")
+                    .cloned()
+                    .unwrap_or_else(|| "/bin/zsh".into()),
+                if req.args.is_empty() {
+                    vec!["-l".into()]
+                } else {
+                    req.args
+                },
+            ),
         };
         let kind = req.kind.unwrap_or_else(|| agents::detect_kind(&cmd));
-        let cwd = req.cwd.unwrap_or_else(|| env.get("HOME").cloned().unwrap_or_else(|| "/".into()));
+        let cwd = req
+            .cwd
+            .unwrap_or_else(|| env.get("HOME").cloned().unwrap_or_else(|| "/".into()));
         if !std::path::Path::new(&cwd).is_dir() {
             bail!("cwd '{cwd}' is not a directory");
         }
-        let restart = req.restart.unwrap_or_else(|| agents::default_restart(&kind).to_string());
+        let restart = req
+            .restart
+            .unwrap_or_else(|| agents::default_restart(&kind).to_string());
         if !["never", "on-failure", "always"].contains(&restart.as_str()) {
             bail!("restart must be never, on-failure or always");
         }
@@ -493,14 +695,41 @@ impl Manager {
                 }
                 n
             }
-            _ => format!("{}-{}", if kind == "process" { basename(&cmd) } else { kind.clone() }, &id[..4]),
+            _ => format!(
+                "{}-{}",
+                if kind == "process" {
+                    basename(&cmd)
+                } else {
+                    kind.clone()
+                },
+                &id[..4]
+            ),
         };
         let now = now_ms();
         let mut row = SessionRow {
-            id: id.clone(), name, cmd, args, cwd, env, labels: req.labels, kind, agent_session_id: req.agent_session_id,
-            resume_cmd: req.resume_cmd, restart, status: "running".into(), exit_code: None, pid: None,
-            cols: req.cols.unwrap_or(120).max(2), rows: req.rows.unwrap_or(32).max(2), created_ms: now, started_ms: now,
-            ended_ms: None, last_active_ms: now, restarts: 0, live_cwd: None, title: None,
+            id: id.clone(),
+            name,
+            cmd,
+            args,
+            cwd,
+            env,
+            labels: req.labels,
+            kind,
+            agent_session_id: req.agent_session_id,
+            resume_cmd: req.resume_cmd,
+            restart,
+            status: "running".into(),
+            exit_code: None,
+            pid: None,
+            cols: req.cols.unwrap_or(120).max(2),
+            rows: req.rows.unwrap_or(32).max(2),
+            created_ms: now,
+            started_ms: now,
+            ended_ms: None,
+            last_active_ms: now,
+            restarts: 0,
+            live_cwd: None,
+            title: None,
         };
         agents::prepare(&mut row);
         self.db.upsert_session(&row)?;
@@ -511,14 +740,16 @@ impl Manager {
             let _ = self.db.delete_session(&id);
             return Err(e);
         }
-        self.db.add_event(Some(&id), "created", &lock(&live.meta).cmd);
+        self.db
+            .add_event(Some(&id), "created", &lock(&live.meta).cmd);
         let row = lock(&live.meta).clone();
         Ok(row)
     }
 
     fn new_live(&self, row: SessionRow, prime: bool) -> Arc<Live> {
         let (tx, _) = broadcast::channel(1024);
-        let mut parser = vt100::Parser::new_with_callbacks(row.rows, row.cols, 0, TitleCb::default());
+        let mut parser =
+            vt100::Parser::new_with_callbacks(row.rows, row.cols, 0, TitleCb::default());
         let mut ring = vec![];
         let (mut consumed, mut offset) = (0, 0);
         if prime {
@@ -531,7 +762,13 @@ impl Manager {
             id: row.id.clone(),
             meta: Mutex::new(row),
             tx,
-            screen: Mutex::new(Screen { parser, ring, seq, dirty: false, offset }),
+            screen: Mutex::new(Screen {
+                parser,
+                ring,
+                seq,
+                dirty: false,
+                offset,
+            }),
             link: Mutex::new(None),
             input: Mutex::new(InputTracker::default()),
             epoch: AtomicU64::new(0),
@@ -541,8 +778,10 @@ impl Manager {
             force_restart: AtomicBool::new(false),
             removed: AtomicBool::new(false),
             resuming: AtomicBool::new(false),
+            shim_pid: AtomicU32::new(0),
             out_tx: self.out_tx.clone(),
             db: self.db.clone(),
+            seats: Mutex::new(Seats::default()),
         })
     }
 
@@ -550,19 +789,45 @@ impl Manager {
     async fn start_proc(self: &Arc<Self>, live: &Arc<Live>) -> Result<()> {
         let meta = lock(&live.meta).clone();
         // A shell or plain process comes back where it was; an agent must start where its transcript lives.
-        let start_dir = meta.live_cwd.as_deref().filter(|d| !matches!(meta.kind.as_str(), "claude" | "codex" | "grok") && std::path::Path::new(d).is_dir()).unwrap_or(&meta.cwd).to_string();
-        let spec = ShimSpec { id: meta.id.clone(), cmd: meta.cmd.clone(), args: meta.args.clone(), cwd: start_dir, env: meta.env.clone(), cols: meta.cols, rows: meta.rows };
+        let start_dir = meta
+            .live_cwd
+            .as_deref()
+            .filter(|d| {
+                !matches!(meta.kind.as_str(), "claude" | "codex" | "grok")
+                    && std::path::Path::new(d).is_dir()
+            })
+            .unwrap_or(&meta.cwd)
+            .to_string();
+        let spec = ShimSpec {
+            id: meta.id.clone(),
+            cmd: meta.cmd.clone(),
+            args: meta.args.clone(),
+            cwd: start_dir,
+            env: meta.env.clone(),
+            cols: meta.cols,
+            rows: meta.rows,
+        };
         std::fs::create_dir_all(shim::shim_dir())?;
-        let _ = std::fs::set_permissions(shim::shim_dir(), std::os::unix::fs::PermissionsExt::from_mode(0o700));
+        let _ = std::fs::set_permissions(
+            shim::shim_dir(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        );
         let _ = std::fs::remove_file(shim::sock_path(&meta.id));
         let _ = std::fs::remove_file(shim::err_path(&meta.id));
         let spec_file = shim::spec_path(&meta.id);
         std::fs::write(&spec_file, serde_json::to_vec(&spec)?)?;
-        let _ = std::fs::set_permissions(&spec_file, std::os::unix::fs::PermissionsExt::from_mode(0o600));
+        let _ = std::fs::set_permissions(
+            &spec_file,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        );
 
         use std::os::unix::process::CommandExt;
         let mut cmd = std::process::Command::new(std::env::current_exe()?);
-        cmd.arg("shim").arg(&spec_file).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        cmd.arg("shim")
+            .arg(&spec_file)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
         unsafe {
             cmd.pre_exec(|| {
                 libc::setsid();
@@ -586,7 +851,8 @@ impl Manager {
             let _ = child.wait();
         });
         if !up {
-            let why = std::fs::read_to_string(shim::err_path(&meta.id)).unwrap_or_else(|_| "the session helper did not start".into());
+            let why = std::fs::read_to_string(shim::err_path(&meta.id))
+                .unwrap_or_else(|_| "the session helper did not start".into());
             let _ = std::fs::remove_file(&spec_file);
             bail!("{}", why.trim());
         }
@@ -601,6 +867,15 @@ impl Manager {
     /// Connects to a running shim, catches up on output since `from_offset`, then follows it live.
     async fn attach_shim(self: &Arc<Self>, live: &Arc<Live>, from_offset: u64) -> Result<()> {
         let stream = UnixStream::connect(shim::sock_path(&live.id)).await?;
+        if let Some(pid) = stream
+            .peer_cred()
+            .ok()
+            .and_then(|c| c.pid())
+            .and_then(|p| u32::try_from(p).ok())
+            .filter(|p| *p > 0)
+        {
+            live.shim_pid.store(pid, Ordering::Relaxed);
+        }
         let (mut r, mut w) = stream.into_split();
         write_frame(&mut w, shim::D_HELLO, &from_offset.to_be_bytes()).await?;
         let (t, ack) = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut r)).await??;
@@ -662,11 +937,18 @@ impl Manager {
             let mut exited = false;
             while let Ok((t, p)) = read_frame(&mut r).await {
                 match t {
-                    shim::S_DATA if p.len() >= 8 => l.emit_at(u64::from_be_bytes(p[..8].try_into().unwrap()), &p[8..]),
+                    shim::S_DATA if p.len() >= 8 => {
+                        l.emit_at(u64::from_be_bytes(p[..8].try_into().unwrap()), &p[8..])
+                    }
                     shim::S_ECHO if !p.is_empty() => l.echo.store(p[0] != 0, Ordering::SeqCst),
                     shim::S_EXIT if p.len() == 4 => {
                         exited = true;
-                        let _ = exit_tx.send(ExitMsg { id: l.id.clone(), epoch, code: i32::from_be_bytes(p[..4].try_into().unwrap()), lost: false });
+                        let _ = exit_tx.send(ExitMsg {
+                            id: l.id.clone(),
+                            epoch,
+                            code: i32::from_be_bytes(p[..4].try_into().unwrap()),
+                            lost: false,
+                        });
                     }
                     _ => {}
                 }
@@ -674,10 +956,19 @@ impl Manager {
             // The connection ended without the process reporting an exit. That is not proof the helper died: it drops a
             // daemon that stalls. Reconnect and carry on from where the screen stands; only a helper that cannot be
             // reached is gone.
-            if !exited && !me.shutting_down.load(Ordering::SeqCst) && l.epoch.load(Ordering::SeqCst) == epoch && !l.removed.load(Ordering::SeqCst) {
+            if !exited
+                && !me.shutting_down.load(Ordering::SeqCst)
+                && l.epoch.load(Ordering::SeqCst) == epoch
+                && !l.removed.load(Ordering::SeqCst)
+            {
                 *lock(&l.link) = None;
                 if !me.clone().reconnect(l.clone()).await {
-                    let _ = exit_tx.send(ExitMsg { id: l.id.clone(), epoch, code: -1, lost: true });
+                    let _ = exit_tx.send(ExitMsg {
+                        id: l.id.clone(),
+                        epoch,
+                        code: -1,
+                        lost: true,
+                    });
                 }
             }
         });
@@ -686,22 +977,33 @@ impl Manager {
 
     /// Tries to get back to a session's helper after its connection dropped. Boxed because attaching spawns the task
     /// that calls this.
-    fn reconnect(self: Arc<Self>, live: Arc<Live>) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> {
+    fn reconnect(
+        self: Arc<Self>,
+        live: Arc<Live>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> {
         Box::pin(async move {
             let killed = live.user_killed.load(Ordering::SeqCst);
             for attempt in 0..4u64 {
                 tokio::time::sleep(Duration::from_millis(100 + attempt * 150)).await;
-                if self.shutting_down.load(Ordering::SeqCst) || live.removed.load(Ordering::SeqCst) {
+                if self.shutting_down.load(Ordering::SeqCst) || live.removed.load(Ordering::SeqCst)
+                {
                     return true;
                 }
                 // A helper that is gone refuses the connection at once: no point waiting on it.
-                if UnixStream::connect(shim::sock_path(&live.id)).await.is_err() {
+                if UnixStream::connect(shim::sock_path(&live.id))
+                    .await
+                    .is_err()
+                {
                     return false;
                 }
                 let from = lock(&live.screen).offset;
                 if self.attach_shim(&live, from).await.is_ok() {
                     live.user_killed.store(killed, Ordering::SeqCst);
-                    self.db.add_event(Some(&live.id), "reconnected", "connection to the session helper was re-established");
+                    self.db.add_event(
+                        Some(&live.id),
+                        "reconnected",
+                        "connection to the session helper was re-established",
+                    );
                     return true;
                 }
             }
@@ -728,7 +1030,9 @@ impl Manager {
             if self.shutting_down.load(Ordering::SeqCst) {
                 continue;
             }
-            let Some(live) = self.live(&m.id) else { continue };
+            let Some(live) = self.live(&m.id) else {
+                continue;
+            };
             if live.epoch.load(Ordering::SeqCst) != m.epoch {
                 continue;
             }
@@ -741,7 +1045,8 @@ impl Manager {
                 let dropped = agents::forget_resume(&mut lock(&live.meta));
                 if dropped {
                     live.emit(b"\r\n\x1b[2m[durable-pty: the previous conversation could not be resumed, starting a new one]\x1b[0m\r\n");
-                    self.db.add_event(Some(&m.id), "resume-failed", "starting a new conversation");
+                    self.db
+                        .add_event(Some(&m.id), "resume-failed", "starting a new conversation");
                     let me = self.clone();
                     tokio::spawn(async move {
                         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -755,10 +1060,20 @@ impl Manager {
             let killed = live.user_killed.load(Ordering::SeqCst);
             let forced = live.force_restart.swap(false, Ordering::SeqCst);
             let failed = !matches!(m.code, 0 | 129 | 130 | 143);
-            let want = forced || (!killed && !live.removed.load(Ordering::SeqCst) && (policy == "always" || (policy == "on-failure" && failed)));
+            let want = forced
+                || (!killed
+                    && !live.removed.load(Ordering::SeqCst)
+                    && (policy == "always" || (policy == "on-failure" && failed)));
             if want && self.restart_allowed(&m.id) {
-                live.emit(format!("\r\n\x1b[2m[durable-pty: process exited ({}), restarting…]\x1b[0m\r\n", m.code).as_bytes());
-                self.db.add_event(Some(&m.id), "restarting", &format!("exit {}", m.code));
+                live.emit(
+                    format!(
+                        "\r\n\x1b[2m[durable-pty: process exited ({}), restarting…]\x1b[0m\r\n",
+                        m.code
+                    )
+                    .as_bytes(),
+                );
+                self.db
+                    .add_event(Some(&m.id), "restarting", &format!("exit {}", m.code));
                 let me = self.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(800)).await;
@@ -766,7 +1081,11 @@ impl Manager {
                 });
             } else {
                 if want {
-                    self.db.add_event(Some(&m.id), "restart-loop", "gave up after 5 restarts in 60s");
+                    self.db.add_event(
+                        Some(&m.id),
+                        "restart-loop",
+                        "gave up after 5 restarts in 60s",
+                    );
                 }
                 self.finalize(&live, m.code, m.lost);
             }
@@ -779,13 +1098,18 @@ impl Manager {
             let resumed = resume && agents::resume(&mut m);
             live.resuming.store(resumed, Ordering::SeqCst);
             if resumed {
-                self.db.add_event(Some(&m.id), "resume", &format!("{} {}", m.cmd, m.args.join(" ")));
+                self.db.add_event(
+                    Some(&m.id),
+                    "resume",
+                    &format!("{} {}", m.cmd, m.args.join(" ")),
+                );
             }
             m.restarts += 1;
         }
         if let Err(e) = self.start_proc(live).await {
             live.emit(format!("\r\n[durable-pty: restart failed: {e}]\r\n").as_bytes());
-            self.db.add_event(Some(&live.id), "restart-failed", &e.to_string());
+            self.db
+                .add_event(Some(&live.id), "restart-failed", &e.to_string());
             self.finalize(live, -1, false);
         }
     }
@@ -794,7 +1118,10 @@ impl Manager {
         if lost {
             live.emit(b"\r\n\x1b[38;5;244m[the session's helper process disappeared: the program is gone]\x1b[0m\r\n");
         } else {
-            live.emit(format!("\r\n\x1b[38;5;244m[process exited with code {code}]\x1b[0m\r\n").as_bytes());
+            live.emit(
+                format!("\r\n\x1b[38;5;244m[process exited with code {code}]\x1b[0m\r\n")
+                    .as_bytes(),
+            );
         }
         {
             let mut m = lock(&live.meta);
@@ -810,14 +1137,24 @@ impl Manager {
         }
         let _ = live.tx.send(Frame::Exit(code));
         lock(&self.live).remove(&live.id);
-        self.db.add_event(Some(&live.id), if lost { "lost" } else { "exited" }, &if lost { "helper process disappeared".to_string() } else { code.to_string() });
+        self.db.add_event(
+            Some(&live.id),
+            if lost { "lost" } else { "exited" },
+            &if lost {
+                "helper process disappeared".to_string()
+            } else {
+                code.to_string()
+            },
+        );
     }
 
     pub fn kill(self: &Arc<Self>, key: &str, signal: Option<&str>) -> Result<()> {
         let live = self.running(key)?;
         live.user_killed.store(true, Ordering::SeqCst);
         match signal {
-            Some(s) => live.signal(Some(signal_number(s).ok_or_else(|| anyhow!("unknown signal '{s}'"))?)),
+            Some(s) => live.signal(Some(
+                signal_number(s).ok_or_else(|| anyhow!("unknown signal '{s}'"))?,
+            )),
             None => self.stop_process(&live),
         }
     }
@@ -857,11 +1194,15 @@ impl Manager {
     pub async fn restart(self: &Arc<Self>, key: &str) -> Result<()> {
         let id = self.resolve(key)?;
         if let Some(live) = self.live(&id)
-            && live.is_running() {
-                live.force_restart.store(true, Ordering::SeqCst);
-                return self.stop_process(&live);
-            }
-        let row = self.db.get_session(&id)?.ok_or_else(|| anyhow!("no such session"))?;
+            && live.is_running()
+        {
+            live.force_restart.store(true, Ordering::SeqCst);
+            return self.stop_process(&live);
+        }
+        let row = self
+            .db
+            .get_session(&id)?
+            .ok_or_else(|| anyhow!("no such session"))?;
         self.revive(row).await;
         Ok(())
     }
@@ -876,7 +1217,9 @@ impl Manager {
     /// Run once at boot. A session whose helper process is still alive is reattached with nothing lost; one whose
     /// process is gone is marked lost and, per its restart policy, relaunched.
     pub async fn recover(self: &Arc<Self>) {
-        let Ok(rows) = self.db.list_sessions() else { return };
+        let Ok(rows) = self.db.list_sessions() else {
+            return;
+        };
         for mut row in rows {
             // A session recorded as lost whose helper still answers was only out of reach: take it back.
             let was_lost = row.status == "lost";
@@ -895,12 +1238,17 @@ impl Manager {
                     Ok(()) => {
                         // No banner here: the program may be a full-screen TUI, and text written into its screen would
                         // sit inside its layout until it redraws. The event log records the reattach.
-                        self.db.add_event(Some(&row.id), "reattached", "daemon restarted, process kept running");
+                        self.db.add_event(
+                            Some(&row.id),
+                            "reattached",
+                            "daemon restarted, process kept running",
+                        );
                         continue;
                     }
                     Err(e) => {
                         lock(&self.live).remove(&row.id);
-                        self.db.add_event(Some(&row.id), "reattach-failed", &e.to_string());
+                        self.db
+                            .add_event(Some(&row.id), "reattach-failed", &e.to_string());
                     }
                 }
             }
@@ -929,11 +1277,18 @@ impl Manager {
             r.agent_session_id = Some(agent_session_id.to_string());
             self.db.upsert_session(&r)?;
         }
-        self.db.add_event(Some(&id), "agent-session", agent_session_id);
+        self.db
+            .add_event(Some(&id), "agent-session", agent_session_id);
         Ok(())
     }
 
-    pub fn set_meta(&self, key: &str, name: Option<String>, labels: Option<BTreeMap<String, String>>, restart: Option<String>) -> Result<()> {
+    pub fn set_meta(
+        &self,
+        key: &str,
+        name: Option<String>,
+        labels: Option<BTreeMap<String, String>>,
+        restart: Option<String>,
+    ) -> Result<()> {
         let id = self.resolve(key)?;
         let mut row = self.row(&id)?;
         if let Some(n) = name {
@@ -966,14 +1321,25 @@ impl Manager {
         Ok(())
     }
 
-    pub fn attach(&self, key: &str, cols: u16, rows: u16, history: bool) -> Result<(Arc<Live>, Vec<u8>, broadcast::Receiver<Frame>)> {
+    /// The returned seat holds the client's size in the session; dropping it (the client going away) gives the size
+    /// back.
+    pub fn attach(
+        &self,
+        key: &str,
+        cols: u16,
+        rows: u16,
+        history: bool,
+        client: Option<u32>,
+    ) -> Result<Attached> {
         let live = self.running(key)?;
-        if cols > 0 && rows > 0 {
-            let _ = live.resize(cols, rows);
-        }
+        let seat = live.seat(cols, rows, client);
         let shell = matches!(lock(&live.meta).kind.as_str(), "shell" | "process");
-        let (snap, rx) = if history && shell { live.subscribe_with_history() } else { live.subscribe() };
-        Ok((live, snap, rx))
+        let (snap, rx) = if history && shell {
+            live.subscribe_with_history()
+        } else {
+            live.subscribe()
+        };
+        Ok((live, snap, rx, seat))
     }
 
     pub fn logs_raw(&self, key: &str, max: usize) -> Result<Vec<u8>> {
@@ -1004,7 +1370,10 @@ impl Manager {
             let (rows, cols) = s.parser.screen().size();
             return Ok((snapshot_bytes(&s), cols, rows, l.is_running()));
         }
-        let row = self.db.get_session(&id)?.ok_or_else(|| anyhow!("no such session"))?;
+        let row = self
+            .db
+            .get_session(&id)?
+            .ok_or_else(|| anyhow!("no such session"))?;
         Ok((self.db.get_screen(&id)?, row.cols, row.rows, false))
     }
 
@@ -1073,7 +1442,8 @@ impl Manager {
                     && l.is_running()
                     && l.tx.receiver_count() == 0
                     && now - m.last_active_ms > idle_ms
-                    && m.pid.is_some_and(|p| p > 0 && !crate::util::has_children(p));
+                    && m.pid
+                        .is_some_and(|p| p > 0 && !crate::util::has_children(p));
                 if idle {
                     doomed.push((m.id, "idle empty shell"));
                 }
@@ -1093,7 +1463,8 @@ impl Manager {
         }
         for (id, why) in doomed {
             if self.remove(&id).is_ok() {
-                self.db.add_event(None, "autoclean", &format!("{id}: {why}"));
+                self.db
+                    .add_event(None, "autoclean", &format!("{id}: {why}"));
             }
         }
     }
@@ -1117,9 +1488,10 @@ impl Manager {
                 let mut m = lock(&l.meta);
                 if !matches!(m.kind.as_str(), "claude" | "codex" | "grok")
                     && let Some(pid) = m.pid.filter(|p| *p > 0)
-                        && let Some(d) = crate::util::process_cwd(pid) {
-                            m.live_cwd = Some(d);
-                        }
+                    && let Some(d) = crate::util::process_cwd(pid)
+                {
+                    m.live_cwd = Some(d);
+                }
             }
             let m = lock(&l.meta).clone();
             let _ = self.db.upsert_session(&m);
@@ -1130,16 +1502,28 @@ impl Manager {
         let pending: Vec<SessionRow> = lock(&self.live)
             .values()
             .map(|l| lock(&l.meta).clone())
-            .filter(|m| m.agent_session_id.is_none() && (m.kind == "claude" || m.kind == "codex") && m.status == "running")
+            .filter(|m| {
+                m.agent_session_id.is_none()
+                    && (m.kind == "claude" || m.kind == "codex")
+                    && m.status == "running"
+            })
             .collect();
         if pending.is_empty() {
             return;
         }
-        let claimed: HashSet<String> = self.db.list_sessions().unwrap_or_default().into_iter().filter_map(|r| r.agent_session_id).collect();
+        let claimed: HashSet<String> = self
+            .db
+            .list_sessions()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|r| r.agent_session_id)
+            .collect();
         for row in pending {
             let c = claimed.clone();
             let id = row.id.clone();
-            if let Ok(Some(found)) = tokio::task::spawn_blocking(move || agents::scan(&row, &c)).await {
+            if let Ok(Some(found)) =
+                tokio::task::spawn_blocking(move || agents::scan(&row, &c)).await
+            {
                 let _ = self.set_agent(&id, &found);
             }
         }
@@ -1151,7 +1535,11 @@ impl Manager {
     pub fn shutdown(&self, kill_sessions: bool, spare: Option<&str>) {
         self.shutting_down.store(true, Ordering::SeqCst);
         if kill_sessions {
-            let lives: Vec<_> = lock(&self.live).values().filter(|l| spare != Some(l.id.as_str())).cloned().collect();
+            let lives: Vec<_> = lock(&self.live)
+                .values()
+                .filter(|l| spare != Some(l.id.as_str()))
+                .cloned()
+                .collect();
             for l in lives {
                 {
                     let mut m = lock(&l.meta);
@@ -1187,12 +1575,19 @@ fn index_stored_output(db: &Db) {
         let mut plain = crate::util::PlainLines::default();
         let mut after = 0;
         loop {
-            let Ok(page) = db.output_page(&id, after, 256) else { return };
+            let Ok(page) = db.output_page(&id, after, 256) else {
+                return;
+            };
             let Some(last) = page.last() else { break };
             after = last.0;
             let mut lines: Vec<(String, i64, String)> = vec![];
             for (_, ts, data) in &page {
-                lines.extend(plain.feed(data).into_iter().map(|text| (id.clone(), *ts, text)));
+                lines.extend(
+                    plain
+                        .feed(data)
+                        .into_iter()
+                        .map(|text| (id.clone(), *ts, text)),
+                );
             }
             if !lines.is_empty() && db.append_lines(&lines).is_err() {
                 return;
@@ -1265,9 +1660,25 @@ mod tests {
     fn title_from_osc() {
         let mut p = vt100::Parser::new_with_callbacks(24, 80, 0, TitleCb::default());
         p.process(b"hi\x1b]0;\xe2\x9c\xb3 Fix the bug\x07there");
-        assert_eq!(p.callbacks_mut().title.take().as_deref().and_then(clean_title).as_deref(), Some("Fix the bug"));
+        assert_eq!(
+            p.callbacks_mut()
+                .title
+                .take()
+                .as_deref()
+                .and_then(clean_title)
+                .as_deref(),
+            Some("Fix the bug")
+        );
         p.process(b"\x1b]2;\xe2\xa0\x82 Fix the bug\x1b\\");
-        assert_eq!(p.callbacks_mut().title.take().as_deref().and_then(clean_title).as_deref(), Some("Fix the bug"));
+        assert_eq!(
+            p.callbacks_mut()
+                .title
+                .take()
+                .as_deref()
+                .and_then(clean_title)
+                .as_deref(),
+            Some("Fix the bug")
+        );
         p.process(b"no title here");
         assert!(p.callbacks_mut().title.take().is_none());
     }

@@ -1,6 +1,6 @@
 use crate::model::SessionRow;
 use anyhow::Result;
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Mutex;
@@ -87,19 +87,27 @@ impl Db {
         c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
         c.execute_batch(SCHEMA)?;
         // Databases created before live_cwd existed.
-        let has: bool = c.prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name='live_cwd'")?.exists([])?;
+        let has: bool = c
+            .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name='live_cwd'")?
+            .exists([])?;
         if !has {
             c.execute_batch("ALTER TABLE sessions ADD COLUMN live_cwd TEXT")?;
         }
-        let has_offsets: bool = c.prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name='shim_consumed'")?.exists([])?;
+        let has_offsets: bool = c
+            .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name='shim_consumed'")?
+            .exists([])?;
         if !has_offsets {
             c.execute_batch("ALTER TABLE sessions ADD COLUMN shim_consumed INTEGER NOT NULL DEFAULT 0; ALTER TABLE sessions ADD COLUMN screen_offset INTEGER NOT NULL DEFAULT 0;")?;
         }
-        let has_title: bool = c.prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name='title'")?.exists([])?;
+        let has_title: bool = c
+            .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name='title'")?
+            .exists([])?;
         if !has_title {
             c.execute_batch("ALTER TABLE sessions ADD COLUMN title TEXT")?;
         }
-        Ok(Db { conn: Mutex::new(c) })
+        Ok(Db {
+            conn: Mutex::new(c),
+        })
     }
 
     fn c(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -124,12 +132,21 @@ impl Db {
     pub fn list_sessions(&self) -> Result<Vec<SessionRow>> {
         let c = self.c();
         let mut st = c.prepare(&format!("SELECT {COLS} FROM sessions ORDER BY created_ms"))?;
-        let rows = st.query_map([], row_to_session)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let rows = st
+            .query_map([], row_to_session)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
 
     pub fn get_session(&self, id: &str) -> Result<Option<SessionRow>> {
-        Ok(self.c().query_row(&format!("SELECT {COLS} FROM sessions WHERE id=?1"), [id], row_to_session).optional()?)
+        Ok(self
+            .c()
+            .query_row(
+                &format!("SELECT {COLS} FROM sessions WHERE id=?1"),
+                [id],
+                row_to_session,
+            )
+            .optional()?)
     }
 
     pub fn delete_session(&self, id: &str) -> Result<()> {
@@ -144,9 +161,15 @@ impl Db {
     /// Session ids matching a key: an exact id, else an exact name, else an id prefix.
     pub fn find_ids(&self, key: &str) -> Result<Vec<String>> {
         let c = self.c();
-        for sql in ["SELECT id FROM sessions WHERE id=?1", "SELECT id FROM sessions WHERE name=?1", "SELECT id FROM sessions WHERE substr(id,1,length(?1))=?1"] {
+        for sql in [
+            "SELECT id FROM sessions WHERE id=?1",
+            "SELECT id FROM sessions WHERE name=?1",
+            "SELECT id FROM sessions WHERE substr(id,1,length(?1))=?1",
+        ] {
             let mut st = c.prepare_cached(sql)?;
-            let ids = st.query_map([key], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            let ids = st
+                .query_map([key], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
             if !ids.is_empty() {
                 return Ok(ids);
             }
@@ -155,15 +178,25 @@ impl Db {
     }
 
     pub fn name_taken(&self, name: &str, except_id: &str) -> Result<bool> {
-        Ok(self.c().prepare_cached("SELECT 1 FROM sessions WHERE name=?1 AND id<>?2")?.exists(params![name, except_id])?)
+        Ok(self
+            .c()
+            .prepare_cached("SELECT 1 FROM sessions WHERE name=?1 AND id<>?2")?
+            .exists(params![name, except_id])?)
     }
 
     pub fn meta(&self, key: &str) -> Option<String> {
-        self.c().query_row("SELECT value FROM meta WHERE key=?1", [key], |r| r.get(0)).optional().ok().flatten()
+        self.c()
+            .query_row("SELECT value FROM meta WHERE key=?1", [key], |r| r.get(0))
+            .optional()
+            .ok()
+            .flatten()
     }
 
     pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
-        self.c().execute("INSERT INTO meta (key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=?2", params![key, value])?;
+        self.c().execute(
+            "INSERT INTO meta (key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=?2",
+            params![key, value],
+        )?;
         Ok(())
     }
 
@@ -171,15 +204,28 @@ impl Db {
     pub fn unindexed_sessions(&self) -> Result<Vec<String>> {
         let c = self.c();
         let mut st = c.prepare("SELECT id FROM sessions s WHERE EXISTS (SELECT 1 FROM output o WHERE o.session_id=s.id) AND NOT EXISTS (SELECT 1 FROM lines l WHERE l.session_id=s.id)")?;
-        let ids = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
+        let ids = st
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
         Ok(ids)
     }
 
     /// A page of a session's stored output in order, after `after_seq`: (seq, ts, bytes).
-    pub fn output_page(&self, id: &str, after_seq: i64, limit: i64) -> Result<Vec<(i64, i64, Vec<u8>)>> {
+    pub fn output_page(
+        &self,
+        id: &str,
+        after_seq: i64,
+        limit: i64,
+    ) -> Result<Vec<(i64, i64, Vec<u8>)>> {
         let c = self.c();
-        let mut st = c.prepare_cached("SELECT seq, ts, data FROM output WHERE session_id=?1 AND seq>?2 ORDER BY seq LIMIT ?3")?;
-        let rows = st.query_map(params![id, after_seq, limit], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut st = c.prepare_cached(
+            "SELECT seq, ts, data FROM output WHERE session_id=?1 AND seq>?2 ORDER BY seq LIMIT ?3",
+        )?;
+        let rows = st
+            .query_map(params![id, after_seq, limit], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
 
@@ -188,7 +234,8 @@ impl Db {
         let mut c = self.c();
         let tx = c.transaction()?;
         {
-            let mut st = tx.prepare_cached("INSERT INTO lines (session_id,ts,text) VALUES (?1,?2,?3)")?;
+            let mut st =
+                tx.prepare_cached("INSERT INTO lines (session_id,ts,text) VALUES (?1,?2,?3)")?;
             for (id, ts, text) in lines {
                 st.execute(params![id, ts, text])?;
             }
@@ -198,13 +245,25 @@ impl Db {
     }
 
     /// Output lines and typed commands containing `query` (case-insensitive), newest first: (session, source, ts, text).
-    pub fn search(&self, query: &str, limit: i64) -> Result<Vec<(String, &'static str, i64, String)>> {
+    pub fn search(
+        &self,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<(String, &'static str, i64, String)>> {
         let c = self.c();
         let mut out = vec![];
-        let like = format!("%{}%", query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+        let like = format!(
+            "%{}%",
+            query
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
         {
             let mut st = c.prepare_cached("SELECT session_id, ts, text FROM commands WHERE text LIKE ?1 ESCAPE '\\' ORDER BY id DESC LIMIT ?2")?;
-            for r in st.query_map(params![like, limit], |r| Ok((r.get(0)?, "command", r.get(1)?, r.get(2)?)))? {
+            for r in st.query_map(params![like, limit], |r| {
+                Ok((r.get(0)?, "command", r.get(1)?, r.get(2)?))
+            })? {
                 out.push(r?);
             }
         }
@@ -214,12 +273,16 @@ impl Db {
             let mut st = c.prepare_cached(
                 "SELECT l.session_id, l.ts, l.text FROM lines_fts f JOIN lines l ON l.id = f.rowid WHERE lines_fts MATCH ?1 ORDER BY f.rowid DESC LIMIT ?2",
             )?;
-            for r in st.query_map(params![phrase, limit], |r| Ok((r.get(0)?, "output", r.get(1)?, r.get(2)?)))? {
+            for r in st.query_map(params![phrase, limit], |r| {
+                Ok((r.get(0)?, "output", r.get(1)?, r.get(2)?))
+            })? {
                 out.push(r?);
             }
         } else {
             let mut st = c.prepare_cached("SELECT session_id, ts, text FROM lines WHERE text LIKE ?1 ESCAPE '\\' ORDER BY id DESC LIMIT ?2")?;
-            for r in st.query_map(params![like, limit], |r| Ok((r.get(0)?, "output", r.get(1)?, r.get(2)?)))? {
+            for r in st.query_map(params![like, limit], |r| {
+                Ok((r.get(0)?, "output", r.get(1)?, r.get(2)?))
+            })? {
                 out.push(r?);
             }
         }
@@ -228,7 +291,10 @@ impl Db {
 
     /// Stores the screen snapshot together with how far into the shim's output it reflects.
     pub fn set_screen(&self, id: &str, screen: &[u8], offset: u64) -> Result<()> {
-        self.c().execute("UPDATE sessions SET last_screen=?2, screen_offset=?3 WHERE id=?1", params![id, screen, offset as i64])?;
+        self.c().execute(
+            "UPDATE sessions SET last_screen=?2, screen_offset=?3 WHERE id=?1",
+            params![id, screen, offset as i64],
+        )?;
         Ok(())
     }
 
@@ -236,21 +302,30 @@ impl Db {
     pub fn offsets(&self, id: &str) -> Result<(u64, u64)> {
         Ok(self
             .c()
-            .query_row("SELECT shim_consumed, screen_offset FROM sessions WHERE id=?1", [id], |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)))
+            .query_row(
+                "SELECT shim_consumed, screen_offset FROM sessions WHERE id=?1",
+                [id],
+                |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
+            )
             .optional()?
             .unwrap_or((0, 0)))
     }
 
     /// A new shim starts its output stream at zero.
     pub fn reset_offsets(&self, id: &str) -> Result<()> {
-        self.c().execute("UPDATE sessions SET shim_consumed=0, screen_offset=0 WHERE id=?1", [id])?;
+        self.c().execute(
+            "UPDATE sessions SET shim_consumed=0, screen_offset=0 WHERE id=?1",
+            [id],
+        )?;
         Ok(())
     }
 
     pub fn get_screen(&self, id: &str) -> Result<Vec<u8>> {
         Ok(self
             .c()
-            .query_row("SELECT last_screen FROM sessions WHERE id=?1", [id], |r| r.get::<_, Option<Vec<u8>>>(0))
+            .query_row("SELECT last_screen FROM sessions WHERE id=?1", [id], |r| {
+                r.get::<_, Option<Vec<u8>>>(0)
+            })
             .optional()?
             .flatten()
             .unwrap_or_default())
@@ -260,7 +335,9 @@ impl Db {
         let mut c = self.c();
         let tx = c.transaction()?;
         {
-            let mut st = tx.prepare_cached("INSERT OR REPLACE INTO output (session_id,seq,ts,data) VALUES (?1,?2,?3,?4)")?;
+            let mut st = tx.prepare_cached(
+                "INSERT OR REPLACE INTO output (session_id,seq,ts,data) VALUES (?1,?2,?3,?4)",
+            )?;
             let mut ends: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
             for (id, seq, ts, data, end) in batch {
                 st.execute(params![id, seq, ts, data])?;
@@ -270,7 +347,9 @@ impl Db {
                 }
             }
             // Stored together with the output, so after a crash the two always agree.
-            let mut up = tx.prepare_cached("UPDATE sessions SET shim_consumed=MAX(shim_consumed, ?2) WHERE id=?1")?;
+            let mut up = tx.prepare_cached(
+                "UPDATE sessions SET shim_consumed=MAX(shim_consumed, ?2) WHERE id=?1",
+            )?;
             for (id, end) in ends {
                 up.execute(params![id, end as i64])?;
             }
@@ -280,7 +359,11 @@ impl Db {
     }
 
     pub fn max_seq(&self, id: &str) -> Result<i64> {
-        Ok(self.c().query_row("SELECT COALESCE(MAX(seq),0) FROM output WHERE session_id=?1", [id], |r| r.get(0))?)
+        Ok(self.c().query_row(
+            "SELECT COALESCE(MAX(seq),0) FROM output WHERE session_id=?1",
+            [id],
+            |r| r.get(0),
+        )?)
     }
 
     pub fn tail_output(&self, id: &str, max_bytes: usize) -> Result<Vec<u8>> {
@@ -319,14 +402,21 @@ impl Db {
     }
 
     pub fn add_command(&self, id: &str, ts: i64, text: &str) -> Result<()> {
-        self.c().execute("INSERT INTO commands (session_id,ts,text) VALUES (?1,?2,?3)", params![id, ts, text])?;
+        self.c().execute(
+            "INSERT INTO commands (session_id,ts,text) VALUES (?1,?2,?3)",
+            params![id, ts, text],
+        )?;
         Ok(())
     }
 
     pub fn commands(&self, id: &str, limit: i64) -> Result<Vec<(i64, String)>> {
         let c = self.c();
-        let mut st = c.prepare("SELECT ts,text FROM commands WHERE session_id=?1 ORDER BY id DESC LIMIT ?2")?;
-        let mut v = st.query_map(params![id, limit], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut st = c.prepare(
+            "SELECT ts,text FROM commands WHERE session_id=?1 ORDER BY id DESC LIMIT ?2",
+        )?;
+        let mut v = st
+            .query_map(params![id, limit], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         v.reverse();
         Ok(v)
     }

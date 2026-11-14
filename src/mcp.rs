@@ -2,7 +2,7 @@
 use crate::client::Client;
 use crate::rpc;
 use crate::session::Manager;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 pub mod async_trait_stub {
@@ -27,7 +27,9 @@ pub struct Remote;
 impl Backend for Remote {
     fn call<'a>(&'a self, method: &'a str, params: Value) -> async_trait_stub::Fut<'a> {
         Box::pin(async move {
-            let mut c = Client::connect_or_start().await.map_err(|e| e.to_string())?;
+            let mut c = Client::connect_or_start()
+                .await
+                .map_err(|e| e.to_string())?;
             c.call(method, params).await.map_err(|e| e.to_string())
         })
     }
@@ -92,7 +94,11 @@ pub async fn handle(backend: &dyn Backend, msg: Value) -> Option<Value> {
     };
     Some(match method {
         "initialize" => {
-            let ver = params.get("protocolVersion").and_then(|v| v.as_str()).unwrap_or("2025-03-26").to_string();
+            let ver = params
+                .get("protocolVersion")
+                .and_then(|v| v.as_str())
+                .unwrap_or("2025-03-26")
+                .to_string();
             reply(Ok(json!({
                 "protocolVersion": ver, "capabilities": {"tools": {}},
                 "serverInfo": {"name": "durable-pty", "version": env!("CARGO_PKG_VERSION")},
@@ -103,7 +109,10 @@ pub async fn handle(backend: &dyn Backend, msg: Value) -> Option<Value> {
         "tools/list" => reply(Ok(json!({"tools": tools()}))),
         "tools/call" => {
             let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let args = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
             let Some(rpc_method) = tool_to_rpc(name) else {
                 return Some(reply(Err((-32602, format!("unknown tool '{name}'")))));
             };

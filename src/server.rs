@@ -1,7 +1,7 @@
 use crate::proto::*;
 use crate::rpc;
 use crate::session::{Frame, Manager};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -19,7 +19,11 @@ pub async fn run_unix(mgr: Arc<Manager>, listener: UnixListener) {
 }
 
 async fn handle(mgr: Arc<Manager>, stream: UnixStream) {
-    let caller = stream.peer_cred().ok().and_then(|c| c.pid()).and_then(|p| u32::try_from(p).ok());
+    let caller = stream
+        .peer_cred()
+        .ok()
+        .and_then(|c| c.pid())
+        .and_then(|p| u32::try_from(p).ok());
     let (r, mut w) = stream.into_split();
     let mut reader = BufReader::new(r);
     let mut line = String::new();
@@ -32,7 +36,11 @@ async fn handle(mgr: Arc<Manager>, stream: UnixStream) {
         let req: Request = match serde_json::from_str(&line) {
             Ok(r) => r,
             Err(e) => {
-                let _ = write_resp(&mut w, Response::from(Value::Null, Err(format!("bad request: {e}")))).await;
+                let _ = write_resp(
+                    &mut w,
+                    Response::from(Value::Null, Err(format!("bad request: {e}"))),
+                )
+                .await;
                 continue;
             }
         };
@@ -40,7 +48,10 @@ async fn handle(mgr: Arc<Manager>, stream: UnixStream) {
             attach(mgr, reader, w, req, caller).await;
             return;
         }
-        let resp = Response::from(req.id, rpc::dispatch_from(&mgr, caller, &req.method, req.params).await);
+        let resp = Response::from(
+            req.id,
+            rpc::dispatch_from(&mgr, caller, &req.method, req.params).await,
+        );
         if write_resp(&mut w, resp).await.is_err() {
             return;
         }
@@ -53,8 +64,19 @@ async fn write_resp(w: &mut tokio::net::unix::OwnedWriteHalf, r: Response) -> st
     w.write_all(&b).await
 }
 
-async fn attach(mgr: Arc<Manager>, mut reader: BufReader<tokio::net::unix::OwnedReadHalf>, mut w: tokio::net::unix::OwnedWriteHalf, req: Request, caller: Option<u32>) {
-    let key = req.params.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+async fn attach(
+    mgr: Arc<Manager>,
+    mut reader: BufReader<tokio::net::unix::OwnedReadHalf>,
+    mut w: tokio::net::unix::OwnedWriteHalf,
+    req: Request,
+    caller: Option<u32>,
+) {
+    let key = req
+        .params
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     // Attaching to the session you are in shows the session its own output, which it then prints again, without end.
     let own = caller.and_then(|pid| mgr.session_of_pid(pid));
     if own.is_some() && mgr.resolve(&key).ok() == own {
@@ -63,8 +85,13 @@ async fn attach(mgr: Arc<Manager>, mut reader: BufReader<tokio::net::unix::Owned
     }
     let cols = req.params.get("cols").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
     let rows = req.params.get("rows").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
-    let history = req.params.get("history").and_then(|v| v.as_bool()).unwrap_or(false);
-    let (live, snap, mut rx) = match mgr.attach(&key, cols, rows, history) {
+    let history = req
+        .params
+        .get("history")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let raw_history = req.params.get("history").and_then(|v| v.as_str()) == Some("raw");
+    let (live, snap, mut rx, seat) = match mgr.attach(&key, cols, rows, history, caller) {
         Ok(x) => x,
         Err(e) => {
             let _ = write_resp(&mut w, Response::from(req.id, Err(e.to_string()))).await;
@@ -72,7 +99,17 @@ async fn attach(mgr: Arc<Manager>, mut reader: BufReader<tokio::net::unix::Owned
         }
     };
     let info = mgr.describe(mgr.row(&live.id).unwrap_or_else(|_| unreachable_row()));
-    if write_resp(&mut w, Response::from(req.id, Ok(json!({"session": info})))).await.is_err() {
+    if write_resp(&mut w, Response::from(req.id, Ok(json!({"session": info}))))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    if raw_history
+        && write_frame(&mut w, S_HISTORY, &live.raw_history())
+            .await
+            .is_err()
+    {
         return;
     }
     if write_frame(&mut w, S_DATA, &snap).await.is_err() {
@@ -101,7 +138,7 @@ async fn attach(mgr: Arc<Manager>, mut reader: BufReader<tokio::net::unix::Owned
             c = irx.recv() => match c {
                 Some((C_INPUT, d)) => { let _ = live.write_input(&d); }
                 Some((C_RESIZE, d)) if d.len() == 4 => {
-                    let _ = live.resize(u16::from_be_bytes([d[0], d[1]]), u16::from_be_bytes([d[2], d[3]]));
+                    seat.resize(u16::from_be_bytes([d[0], d[1]]), u16::from_be_bytes([d[2], d[3]]));
                 }
                 Some((C_DETACH, _)) | None => return,
                 _ => {}

@@ -1,10 +1,10 @@
 use crate::paths;
-use anyhow::{anyhow, bail, Result};
-use serde_json::{json, Value};
+use anyhow::{Result, anyhow, bail};
+use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 pub struct Client {
     pub reader: BufReader<OwnedReadHalf>,
@@ -16,7 +16,11 @@ impl Client {
     pub async fn connect() -> Result<Client> {
         let s = UnixStream::connect(paths::sock()).await?;
         let (r, w) = s.into_split();
-        Ok(Client { reader: BufReader::new(r), writer: w, next: 1 })
+        Ok(Client {
+            reader: BufReader::new(r),
+            writer: w,
+            next: 1,
+        })
     }
 
     /// Connects, starting the daemon in the background first when it is not running.
@@ -31,7 +35,10 @@ impl Client {
                 return Ok(c);
             }
         }
-        bail!("could not start the durable-pty daemon (see {})", paths::log_file().display())
+        bail!(
+            "could not start the durable-pty daemon (see {})",
+            paths::log_file().display()
+        )
     }
 
     pub async fn call(&mut self, method: &str, params: Value) -> Result<Value> {
@@ -48,7 +55,9 @@ impl Client {
         if v["ok"] == json!(true) {
             Ok(v["result"].clone())
         } else {
-            Err(anyhow!(v["error"].as_str().unwrap_or("request failed").to_string()))
+            Err(anyhow!(
+                v["error"].as_str().unwrap_or("request failed").to_string()
+            ))
         }
     }
 }
@@ -56,9 +65,15 @@ impl Client {
 pub fn spawn_daemon() -> Result<()> {
     use std::os::unix::process::CommandExt;
     paths::ensure_home()?;
-    let log = std::fs::OpenOptions::new().create(true).append(true).open(paths::log_file())?;
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(paths::log_file())?;
     let mut cmd = std::process::Command::new(std::env::current_exe()?);
-    cmd.arg("serve").stdin(std::process::Stdio::null()).stdout(log.try_clone()?).stderr(log);
+    cmd.arg("serve")
+        .stdin(std::process::Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log);
     unsafe {
         cmd.pre_exec(|| {
             libc::setsid();

@@ -133,6 +133,37 @@ sleep 0.5
 check "it can still stop a different session" '! "$BIN" ls | grep other | grep -q running'
 check "from outside, the same session can be stopped" '"$BIN" kill inside -s KILL && sleep 0.5 && ! "$BIN" ls | grep inside | grep -q running'
 
+echo "# a second client leaving gives the session its size back"
+"$BIN" new -d -n sized -- sh -c 'sleep 300' >/dev/null
+check "size returns to the remaining client, then to what it was" 'python3 - "$DPTY_HOME" "$BIN" <<PY
+import json, socket, subprocess, sys, time, os
+home, binp = sys.argv[1], sys.argv[2]
+def size():
+    out = subprocess.run([binp, "ls", "--json"], capture_output=True, text=True).stdout
+    s = next(x for x in json.loads(out) if x["name"] == "sized")
+    return (s["cols"], s["rows"])
+def attach(cols, rows):
+    c = socket.socket(socket.AF_UNIX); c.connect(home + "/dpty.sock")
+    c.sendall((json.dumps({"id": 1, "method": "attach", "params": {"id": "sized", "cols": cols, "rows": rows}}) + "\\n").encode())
+    c.recv(65536); time.sleep(0.2)
+    return c
+def wait(want):
+    for _ in range(40):
+        if size() == want: return True
+        time.sleep(0.05)
+    print("wanted", want, "got", size()); return False
+before = size()
+first = attach(150, 40)
+ok = wait((150, 40))
+second = attach(70, 18)
+ok = ok and wait((70, 18))
+second.close()
+ok = ok and wait((150, 40))
+first.close()
+ok = ok and wait(before)
+sys.exit(0 if ok else 1)
+PY'
+
 echo "# mcp (stdio)"
 OUT=$(printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}' \

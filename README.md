@@ -16,11 +16,13 @@ dpty install            # run at login, restart on exit (launchd / systemd --use
 dpty mcp                # MCP over stdio;  dpty mcp --http 127.0.0.1:7979  for streamable HTTP + SSE
 ```
 
-In the session browser the left side lists sessions and the right side shows the selected session's details and a live preview of its screen (it is a copy: nothing is attached or resized). Arrow keys or `j`/`k` select, Enter attaches, and `Ctrl-\` detaches back to the browser. `/` searches names, titles and directories as you type, and after a short pause also every session's output, typed commands and claude/codex transcripts, showing the line that matched. For an exited or lost session, Enter shows its last screen and `r` restarts it.
+In the session browser the left side lists sessions and the right side shows the selected session's details and a live preview of its screen (it is a copy: nothing is attached or resized). Arrow keys or `j`/`k` select. Enter opens the session in the whole window under a one-line dpty header; click the header or press `Ctrl-]` to come back to the list. `/` searches names, titles and directories as you type, and after a short pause also every session's output, typed commands and claude/codex transcripts, showing the line that matched. For an exited or lost session, Enter shows its last screen and `r` restarts it.
 
 | Key | Does |
 |---|---|
-| Enter | attach (running) or show the last screen (ended) |
+| Enter | open in the whole window under the dpty header (running) or show the last screen (ended) |
+| Tab | use the side panel as a terminal on the selected session |
+| `Ctrl-]` | back to the list from a session (or click the header / outside the panel) |
 | `/` | search; Esc clears |
 | `n` | new session (type a command, empty for a shell) |
 | `l` | output so far |
@@ -28,7 +30,14 @@ In the session browser the left side lists sessions and the right side shows the
 | `r` | restart an ended session |
 | `R` | rename |
 | `d` | delete the session and its history, after confirmation |
+| `i` | Nerd Font icons on/off (remembered) |
 | `q` | quit |
+
+The side panel is a working terminal once it has the keyboard (Tab, or click the preview): typing, paste and the mouse go to the session, which is resized to the panel. Shift-PageUp/PageDown or the wheel scroll back. Hyperlinks a program prints are real links in your terminal, and images (kitty graphics protocol, on terminals that draw them: Ghostty, kitty) show in place and scroll with the text. Selecting text needs your terminal's override while the browser is open; `dpty attach <id>` from a shell gives a session the real terminal, with native selection and scrollback. `Ctrl-\` also leaves, unless the browser is itself running inside a dpty session, where the outer attach takes that key.
+
+A session has one size. It takes the size of whichever client attached or resized last, and when that client leaves the size goes back to the one before it, so using the side panel does not leave a session small for the terminal that was already showing it.
+
+Mouse: drag the line between panes to resize them (remembered in `browser.json`), click a session to select it, wheel to move through the list. While the browser is open, selecting text needs your terminal's override, usually Shift-drag (Option-drag in macOS Terminal).
 
 ## How durability works
 

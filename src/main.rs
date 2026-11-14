@@ -7,19 +7,21 @@ mod http;
 mod install;
 mod mcp;
 mod model;
+mod pane;
 mod paths;
 mod proto;
+mod rich;
 mod rpc;
 mod server;
 mod session;
 mod shim;
 mod util;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use client::Client;
 use proto::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use std::sync::Arc;
@@ -29,7 +31,11 @@ use tokio::sync::mpsc;
 const DEFAULT_HTTP: &str = "127.0.0.1:7878";
 
 #[derive(Parser)]
-#[command(name = "dpty", version, about = "Durable PTY sessions: daemon, CLI and MCP server in one binary")]
+#[command(
+    name = "dpty",
+    version,
+    about = "Durable PTY sessions: daemon, CLI and MCP server in one binary"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -52,12 +58,14 @@ enum Cmd {
     },
     /// Internal: the helper process that owns one session's terminal
     #[command(hide = true)]
-    Shim { spec: String },
+    Shim {
+        spec: String,
+    },
     /// Daemon status
     Status,
     /// Print the bearer token for the HTTP/WebSocket/MCP listener
     Token,
-    /// List sessions
+    /// List sessions, then every running dpty process
     Ls {
         #[arg(long)]
         json: bool,
@@ -108,9 +116,13 @@ enum Cmd {
         signal: Option<String>,
     },
     /// Delete a session and its history
-    Rm { id: String },
+    Rm {
+        id: String,
+    },
     /// Relaunch a session, resuming the agent conversation when known
-    Restart { id: String },
+    Restart {
+        id: String,
+    },
     /// Type into a session
     Send {
         id: String,
@@ -131,7 +143,9 @@ enum Cmd {
         raw: bool,
     },
     /// Current screen as plain text
-    Screen { id: String },
+    Screen {
+        id: String,
+    },
     /// Commands typed into a session
     History {
         id: String,
@@ -153,7 +167,10 @@ enum Cmd {
         restart: Option<String>,
     },
     /// Record the agent's own session id (for hooks): dpty tag-agent $DPTY_SESSION <id>
-    TagAgent { id: String, agent_session_id: String },
+    TagAgent {
+        id: String,
+        agent_session_id: String,
+    },
     /// Wait until text shows up in a session
     Wait {
         id: String,
@@ -181,7 +198,11 @@ enum Cmd {
 fn kv(items: &[String], what: &str) -> Result<BTreeMap<String, String>> {
     items
         .iter()
-        .map(|s| s.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())).ok_or_else(|| anyhow::anyhow!("{what} must be KEY=VALUE, got '{s}'")))
+        .map(|s| {
+            s.split_once('=')
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .ok_or_else(|| anyhow::anyhow!("{what} must be KEY=VALUE, got '{s}'"))
+        })
         .collect()
 }
 
@@ -190,14 +211,56 @@ fn kv(items: &[String], what: &str) -> Result<BTreeMap<String, String>> {
 fn is_session_marker(key: &str) -> bool {
     key == "CLAUDECODE"
         || (key.starts_with("CLAUDE_CODE_")
-            && ["SESSION", "MESSAGING", "ENTRYPOINT", "EXECPATH", "PARENT", "BRIDGE", "SOCKET"].iter().any(|m| key.contains(m)))
-        || (key.starts_with("CODEX_") && ["SESSION", "THREAD", "PARENT"].iter().any(|m| key.contains(m)))
+            && [
+                "SESSION",
+                "MESSAGING",
+                "ENTRYPOINT",
+                "EXECPATH",
+                "PARENT",
+                "BRIDGE",
+                "SOCKET",
+            ]
+            .iter()
+            .any(|m| key.contains(m)))
+        || (key.starts_with("CODEX_")
+            && ["SESSION", "THREAD", "PARENT"]
+                .iter()
+                .any(|m| key.contains(m)))
 }
 
 fn capture_env(all: bool) -> BTreeMap<String, String> {
-    const KEEP: &[&str] = &["PATH", "HOME", "SHELL", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "SSH_AUTH_SOCK", "TERM_PROGRAM"];
-    const PREFIX: &[&str] = &["XDG_", "ANTHROPIC_", "OPENAI_", "CODEX_", "CLAUDE_", "XAI_", "GROK_", "GOOGLE_", "GEMINI_", "NVM_", "VOLTA_"];
-    std::env::vars().filter(|(k, _)| (all || KEEP.contains(&k.as_str()) || PREFIX.iter().any(|p| k.starts_with(p))) && !is_session_marker(k)).collect()
+    const KEEP: &[&str] = &[
+        "PATH",
+        "HOME",
+        "SHELL",
+        "USER",
+        "LOGNAME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TMPDIR",
+        "SSH_AUTH_SOCK",
+        "TERM_PROGRAM",
+    ];
+    const PREFIX: &[&str] = &[
+        "XDG_",
+        "ANTHROPIC_",
+        "OPENAI_",
+        "CODEX_",
+        "CLAUDE_",
+        "XAI_",
+        "GROK_",
+        "GOOGLE_",
+        "GEMINI_",
+        "NVM_",
+        "VOLTA_",
+    ];
+    std::env::vars()
+        .filter(|(k, _)| {
+            (all || KEEP.contains(&k.as_str()) || PREFIX.iter().any(|p| k.starts_with(p)))
+                && !is_session_marker(k)
+        })
+        .collect()
 }
 
 fn age(ms: i64) -> String {
@@ -249,7 +312,10 @@ impl Drop for RawMode {
 /// switch on) send it as an escape sequence instead of the single byte.
 fn find_detach(d: &[u8]) -> Option<usize> {
     const FORMS: [&[u8]; 3] = [b"\x1c", b"\x1b[92;5u", b"\x1b[27;5;92~"];
-    FORMS.iter().filter_map(|f| d.windows(f.len()).position(|w| w == *f)).min()
+    FORMS
+        .iter()
+        .filter_map(|f| d.windows(f.len()).position(|w| w == *f))
+        .min()
 }
 
 /// Follows whether the program has the terminal on its alternate screen, so a detach can switch back.
@@ -263,7 +329,11 @@ impl AltScreen {
     fn feed(&mut self, d: &[u8]) {
         let mut buf = std::mem::take(&mut self.tail);
         buf.extend_from_slice(d);
-        let last = |pats: [&[u8]; 3]| pats.iter().filter_map(|p| buf.windows(p.len()).rposition(|w| w == *p)).max();
+        let last = |pats: [&[u8]; 3]| {
+            pats.iter()
+                .filter_map(|p| buf.windows(p.len()).rposition(|w| w == *p))
+                .max()
+        };
         let on = last([b"\x1b[?1049h", b"\x1b[?1047h", b"\x1b[?47h"]);
         let off = last([b"\x1b[?1049l", b"\x1b[?1047l", b"\x1b[?47l"]);
         match (on, off) {
@@ -283,7 +353,12 @@ const TERMINAL_RESET: &[u8] =
 async fn attach(id: &str, history: bool) -> Result<()> {
     let mut c = Client::connect_or_start().await?;
     let (cols, rows) = term_size();
-    let info = c.call("attach", json!({"id": id, "cols": cols, "rows": rows, "history": history})).await?;
+    let info = c
+        .call(
+            "attach",
+            json!({"id": id, "cols": cols, "rows": rows, "history": history}),
+        )
+        .await?;
     let name = info["session"]["name"].as_str().unwrap_or(id).to_string();
     let mut reader = c.reader;
     let mut writer = c.writer;
@@ -355,8 +430,38 @@ async fn attach(id: &str, history: bool) -> Result<()> {
     std::process::exit(0);
 }
 
+fn print_processes(rows: &[Value]) {
+    println!("\n{:<8} {:<10} SESSION", "PID", "ROLE");
+    if rows.is_empty() {
+        println!("(none)");
+        return;
+    }
+    for p in rows {
+        let session = p["session"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("-");
+        let role = p["role"].as_str().unwrap_or("-");
+        let pid = p["pid"]
+            .as_u64()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "-".into());
+        let cmd = p["cmd"].as_str().unwrap_or("");
+        // A daemon, or a shim or client this daemon owns, is identified by its role and session.
+        // Anything else prints the command, so a stray shim or a zombie is visible.
+        if role == "daemon" || (session != "-" && matches!(role, "shim" | "client")) {
+            println!("{pid:<8} {role:<10} {session}");
+        } else {
+            println!("{pid:<8} {role:<10} {session:<18} {cmd}");
+        }
+    }
+}
+
 fn print_table(sessions: &[Value]) {
-    println!("{:<9} {:<18} {:<8} {:<8} {:<7} {:<5} {:<30} {:<38} CWD", "ID", "NAME", "KIND", "STATUS", "PID", "AGE", "TITLE", "AGENT SESSION");
+    println!(
+        "{:<9} {:<18} {:<8} {:<8} {:<7} {:<5} {:<30} {:<38} CWD",
+        "ID", "NAME", "KIND", "STATUS", "PID", "AGE", "TITLE", "AGENT SESSION"
+    );
     for s in sessions {
         println!(
             "{:<9} {:<18} {:<8} {:<8} {:<7} {:<5} {:<30} {:<38} {}",
@@ -364,9 +469,15 @@ fn print_table(sessions: &[Value]) {
             s["name"].as_str().unwrap_or(""),
             s["kind"].as_str().unwrap_or(""),
             s["status"].as_str().unwrap_or(""),
-            s["pid"].as_u64().map(|p| p.to_string()).unwrap_or("-".into()),
+            s["pid"]
+                .as_u64()
+                .map(|p| p.to_string())
+                .unwrap_or("-".into()),
             age(s["started_ms"].as_i64().unwrap_or(0)),
-            s["title"].as_str().map(|t| t.chars().take(30).collect::<String>()).unwrap_or("-".into()),
+            s["title"]
+                .as_str()
+                .map(|t| t.chars().take(30).collect::<String>())
+                .unwrap_or("-".into()),
             s["agent_session_id"].as_str().unwrap_or("-"),
             s["cwd"].as_str().unwrap_or(""),
         );
@@ -382,7 +493,18 @@ fn main() {
 
 fn start(cli: Cli) -> Result<()> {
     // Commands that only print: when the reader goes away (`dpty ls | head`), end quietly like any other tool.
-    if matches!(&cli.cmd, Some(Cmd::Ls { .. } | Cmd::Logs { .. } | Cmd::Screen { .. } | Cmd::History { .. } | Cmd::Events { .. } | Cmd::Status | Cmd::Token)) {
+    if matches!(
+        &cli.cmd,
+        Some(
+            Cmd::Ls { .. }
+                | Cmd::Logs { .. }
+                | Cmd::Screen { .. }
+                | Cmd::History { .. }
+                | Cmd::Events { .. }
+                | Cmd::Status
+                | Cmd::Token
+        )
+    ) {
         unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     }
     // Shims use blocking I/O and their own threads, so they do not need a Tokio runtime.
@@ -403,13 +525,24 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Shim { spec } => shim::run(&spec)?,
         Cmd::Stop { sessions } => match Client::connect().await {
             Ok(mut c) => {
-                c.call("shutdown", json!({"kill_sessions": sessions})).await?;
-                println!("{}", if sessions { "stopped, and every session was stopped" } else { "stopped (sessions keep running and are picked up again on next start)" });
+                c.call("shutdown", json!({"kill_sessions": sessions}))
+                    .await?;
+                println!(
+                    "{}",
+                    if sessions {
+                        "stopped, and every session was stopped"
+                    } else {
+                        "stopped (sessions keep running and are picked up again on next start)"
+                    }
+                );
             }
             Err(_) => println!("not running"),
         },
         Cmd::Status => match Client::connect().await {
-            Ok(mut c) => println!("{}", serde_json::to_string_pretty(&c.call("status", json!({})).await?)?),
+            Ok(mut c) => println!(
+                "{}",
+                serde_json::to_string_pretty(&c.call("status", json!({})).await?)?
+            ),
             Err(_) => {
                 println!("not running");
                 std::process::exit(3);
@@ -417,8 +550,16 @@ async fn run(cli: Cli) -> Result<()> {
         },
         Cmd::Token => println!("{}", paths::token()),
         Cmd::Browse => browser::run().await?,
-        Cmd::Ls { json: as_json, label, status } => {
-            let r = call("list", json!({"labels": kv(&label, "label")?, "status": status})).await?;
+        Cmd::Ls {
+            json: as_json,
+            label,
+            status,
+        } => {
+            let r = call(
+                "list",
+                json!({"labels": kv(&label, "label")?, "status": status}),
+            )
+            .await?;
             let list = r["sessions"].as_array().cloned().unwrap_or_default();
             if as_json {
                 println!("{}", serde_json::to_string_pretty(&list)?);
@@ -427,12 +568,45 @@ async fn run(cli: Cli) -> Result<()> {
             } else {
                 print_table(&list);
             }
+            if !as_json {
+                match call("ps", json!({})).await {
+                    Ok(r) => {
+                        print_processes(r["processes"].as_array().map(Vec::as_slice).unwrap_or(&[]))
+                    }
+                    Err(e) => eprintln!("dpty processes: {e}"),
+                }
+            }
         }
-        Cmd::New { name, cwd, label, env, env_all, detach, restart, kind, resume_cmd, mut cmd } => {
+        Cmd::New {
+            name,
+            cwd,
+            label,
+            env,
+            env_all,
+            detach,
+            restart,
+            kind,
+            resume_cmd,
+            mut cmd,
+        } => {
             let mut envm = capture_env(env_all);
             envm.extend(kv(&env, "env")?);
-            let cwd = cwd.map(|c| std::fs::canonicalize(&c).map(|p| p.to_string_lossy().into_owned()).unwrap_or(c)).or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()));
-            let (c, args) = if cmd.is_empty() { (None, vec![]) } else { (Some(cmd.remove(0)), cmd) };
+            let cwd = cwd
+                .map(|c| {
+                    std::fs::canonicalize(&c)
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or(c)
+                })
+                .or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .map(|p| p.to_string_lossy().into_owned())
+                });
+            let (c, args) = if cmd.is_empty() {
+                (None, vec![])
+            } else {
+                (Some(cmd.remove(0)), cmd)
+            };
             let (cols, rows) = term_size();
             let r = call(
                 "new",
@@ -457,7 +631,13 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Restart { id } => {
             call("restart", json!({"id": id})).await?;
         }
-        Cmd::Send { id, text, no_enter, key, enter_delay_ms } => {
+        Cmd::Send {
+            id,
+            text,
+            no_enter,
+            key,
+            enter_delay_ms,
+        } => {
             let t = text.join(" ");
             call("send", json!({"id": id, "text": t, "enter": !no_enter && !t.is_empty(), "keys": key, "enter_delay_ms": enter_delay_ms})).await?;
         }
@@ -465,31 +645,84 @@ async fn run(cli: Cli) -> Result<()> {
             if raw {
                 use base64::Engine;
                 let r = call("logs", json!({"id": id, "bytes": bytes, "raw": true})).await?;
-                let b = base64::engine::general_purpose::STANDARD.decode(r["b64"].as_str().unwrap_or(""))?;
+                let b = base64::engine::general_purpose::STANDARD
+                    .decode(r["b64"].as_str().unwrap_or(""))?;
                 tokio::io::stdout().write_all(&b).await?;
             } else {
-                print!("{}", call("logs", json!({"id": id, "bytes": bytes})).await?["text"].as_str().unwrap_or(""));
+                print!(
+                    "{}",
+                    call("logs", json!({"id": id, "bytes": bytes})).await?["text"]
+                        .as_str()
+                        .unwrap_or("")
+                );
             }
         }
-        Cmd::Screen { id } => print!("{}", call("screen", json!({"id": id})).await?["text"].as_str().unwrap_or("")),
+        Cmd::Screen { id } => print!(
+            "{}",
+            call("screen", json!({"id": id})).await?["text"]
+                .as_str()
+                .unwrap_or("")
+        ),
         Cmd::History { id, limit } => {
-            for c in call("commands", json!({"id": id, "limit": limit})).await?["commands"].as_array().cloned().unwrap_or_default() {
-                println!("{}  {}", age(c["ts"].as_i64().unwrap_or(0)), c["text"].as_str().unwrap_or(""));
+            for c in call("commands", json!({"id": id, "limit": limit})).await?["commands"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+            {
+                println!(
+                    "{}  {}",
+                    age(c["ts"].as_i64().unwrap_or(0)),
+                    c["text"].as_str().unwrap_or("")
+                );
             }
         }
         Cmd::Events { id, limit } => {
-            for e in call("events", json!({"id": id, "limit": limit})).await?["events"].as_array().cloned().unwrap_or_default() {
-                println!("{:>5} ago  {:<9} {:<14} {}", age(e["ts"].as_i64().unwrap_or(0)), e["session"].as_str().unwrap_or("-"), e["kind"].as_str().unwrap_or(""), e["detail"].as_str().unwrap_or(""));
+            for e in call("events", json!({"id": id, "limit": limit})).await?["events"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+            {
+                println!(
+                    "{:>5} ago  {:<9} {:<14} {}",
+                    age(e["ts"].as_i64().unwrap_or(0)),
+                    e["session"].as_str().unwrap_or("-"),
+                    e["kind"].as_str().unwrap_or(""),
+                    e["detail"].as_str().unwrap_or("")
+                );
             }
         }
-        Cmd::Set { id, name, label, restart } => {
-            call("set", json!({"id": id, "name": name, "labels": kv(&label, "label")?, "restart": restart})).await?;
+        Cmd::Set {
+            id,
+            name,
+            label,
+            restart,
+        } => {
+            call(
+                "set",
+                json!({"id": id, "name": name, "labels": kv(&label, "label")?, "restart": restart}),
+            )
+            .await?;
         }
-        Cmd::TagAgent { id, agent_session_id } => {
-            call("set_agent", json!({"id": id, "agent_session_id": agent_session_id})).await?;
+        Cmd::TagAgent {
+            id,
+            agent_session_id,
+        } => {
+            call(
+                "set_agent",
+                json!({"id": id, "agent_session_id": agent_session_id}),
+            )
+            .await?;
         }
-        Cmd::Wait { id, pattern, timeout } => {
-            let r = call("wait", json!({"id": id, "pattern": pattern, "timeout_ms": timeout * 1000})).await?;
+        Cmd::Wait {
+            id,
+            pattern,
+            timeout,
+        } => {
+            let r = call(
+                "wait",
+                json!({"id": id, "pattern": pattern, "timeout_ms": timeout * 1000}),
+            )
+            .await?;
             if r["matched"] != json!(true) {
                 eprintln!("dpty: timed out");
                 std::process::exit(2);
@@ -500,7 +733,15 @@ async fn run(cli: Cli) -> Result<()> {
             Some(addr) => {
                 let l = tokio::net::TcpListener::bind(&addr).await?;
                 let token = (!no_auth).then(paths::token);
-                eprintln!("dpty mcp: http://{} (POST /mcp, GET /sse){}", l.local_addr()?, if token.is_some() { ", bearer token required" } else { "" });
+                eprintln!(
+                    "dpty mcp: http://{} (POST /mcp, GET /sse){}",
+                    l.local_addr()?,
+                    if token.is_some() {
+                        ", bearer token required"
+                    } else {
+                        ""
+                    }
+                );
                 axum::serve(l, http::mcp_router(token)).await?;
             }
         },

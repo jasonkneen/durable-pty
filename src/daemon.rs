@@ -2,7 +2,7 @@ use crate::client::Client;
 use crate::db::Db;
 use crate::session::Manager;
 use crate::{http, paths, rpc, server};
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use tokio::net::UnixListener;
@@ -10,12 +10,28 @@ use tokio::net::UnixListener;
 pub async fn serve(http_addr: Option<String>) -> Result<()> {
     paths::ensure_home()?;
     // One daemon per home: the lock is held for the life of the process, so two racing starts cannot both win.
-    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(paths::home().join("dpty.lock"))?;
-    if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&lock), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        bail!("durable-pty is already running ({})", paths::sock().display());
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(paths::home().join("dpty.lock"))?;
+    if unsafe {
+        libc::flock(
+            std::os::fd::AsRawFd::as_raw_fd(&lock),
+            libc::LOCK_EX | libc::LOCK_NB,
+        )
+    } != 0
+    {
+        bail!(
+            "durable-pty is already running ({})",
+            paths::sock().display()
+        );
     }
     if Client::connect().await.is_ok() {
-        bail!("durable-pty is already running ({})", paths::sock().display());
+        bail!(
+            "durable-pty is already running ({})",
+            paths::sock().display()
+        );
     }
     let _ = std::fs::remove_file(paths::sock());
     let db = Arc::new(Db::open(&paths::db())?);
@@ -32,7 +48,10 @@ pub async fn serve(http_addr: Option<String>) -> Result<()> {
             Ok(l) => {
                 let bound = l.local_addr()?.to_string();
                 let _ = rpc::HTTP_ADDR.set(bound.clone());
-                eprintln!("durable-pty: http/ws/mcp on http://{bound} (token in {})", paths::home().join("token").display());
+                eprintln!(
+                    "durable-pty: http/ws/mcp on http://{bound} (token in {})",
+                    paths::home().join("token").display()
+                );
                 let app = http::daemon_router(mgr.clone(), paths::token());
                 tokio::spawn(async move {
                     if let Err(e) = axum::serve(l, app).await {
@@ -43,9 +62,13 @@ pub async fn serve(http_addr: Option<String>) -> Result<()> {
             Err(e) => eprintln!("durable-pty: http disabled, could not listen on {addr}: {e}"),
         }
     }
-    eprintln!("durable-pty: serving on {} (pid {})", paths::sock().display(), std::process::id());
+    eprintln!(
+        "durable-pty: serving on {} (pid {})",
+        paths::sock().display(),
+        std::process::id()
+    );
 
-    use tokio::signal::unix::{signal, SignalKind};
+    use tokio::signal::unix::{SignalKind, signal};
     let mut term = signal(SignalKind::terminate())?;
     let mut int = signal(SignalKind::interrupt())?;
     let mut hup = signal(SignalKind::hangup())?;

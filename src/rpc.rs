@@ -1,14 +1,16 @@
-use crate::session::{key_bytes, Manager, NewReq};
+use crate::session::{Manager, NewReq, key_bytes};
 use crate::util::{now_ms, strip_ansi};
 use base64::Engine;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 pub static HTTP_ADDR: OnceLock<String> = OnceLock::new();
 
 fn s<'a>(p: &'a Value, k: &str) -> Result<&'a str, String> {
-    p.get(k).and_then(|v| v.as_str()).ok_or_else(|| format!("missing '{k}'"))
+    p.get(k)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("missing '{k}'"))
 }
 fn opt_s<'a>(p: &'a Value, k: &str) -> Option<&'a str> {
     p.get(k).and_then(|v| v.as_str())
@@ -23,7 +25,30 @@ pub const OWN_SESSION: &str = "refused: this is the session the request came fro
 /// requester (and whatever launched it) down with it; attaching to it or typing into it feeds the session its own
 /// output. `caller` is the requesting process. Sessions in `list`/`get` answers are marked `here` when they are the
 /// caller's own.
-pub async fn dispatch_from(m: &Arc<Manager>, caller: Option<u32>, method: &str, mut p: Value) -> Result<Value, String> {
+pub async fn dispatch_from(
+    m: &Arc<Manager>,
+    caller: Option<u32>,
+    method: &str,
+    mut p: Value,
+) -> Result<Value, String> {
+    if method == "ps" {
+        let mgr = Arc::clone(m);
+        let processes = tokio::task::spawn_blocking(move || mgr.processes(caller))
+            .await
+            .map_err(e)?;
+        return Ok(json!({ "processes": processes }));
+    }
+    if method == "status" {
+        let mut out = dispatch(m, method, p).await?;
+        let mgr = Arc::clone(m);
+        let processes = tokio::task::spawn_blocking(move || mgr.processes(caller))
+            .await
+            .map_err(e)?;
+        if let Some(obj) = out.as_object_mut() {
+            obj.insert("processes".into(), json!(processes));
+        }
+        return Ok(out);
+    }
     let guarded = matches!(method, "kill" | "rm" | "restart" | "send" | "resize");
     if !guarded && !matches!(method, "shutdown" | "list" | "get") {
         return dispatch(m, method, p).await;
@@ -33,7 +58,9 @@ pub async fn dispatch_from(m: &Arc<Manager>, caller: Option<u32>, method: &str, 
         if guarded && m.resolve(s(&p, "id")?).is_ok_and(|id| &id == own) {
             return Err(OWN_SESSION.into());
         }
-        if method == "shutdown" && let Some(o) = p.as_object_mut() {
+        if method == "shutdown"
+            && let Some(o) = p.as_object_mut()
+        {
             o.insert("spare".into(), json!(own));
         }
     }
@@ -46,7 +73,11 @@ pub async fn dispatch_from(m: &Arc<Manager>, caller: Option<u32>, method: &str, 
         };
         match method {
             "get" => mark(&mut out),
-            "list" => out["sessions"].as_array_mut().into_iter().flatten().for_each(mark),
+            "list" => out["sessions"]
+                .as_array_mut()
+                .into_iter()
+                .flatten()
+                .for_each(mark),
             _ => {}
         }
     }
@@ -102,7 +133,11 @@ pub async fn dispatch(m: &Arc<Manager>, method: &str, p: Value) -> Result<Value,
                 bytes.extend_from_slice(t.as_bytes());
             }
             if let Some(b) = opt_s(&p, "b64") {
-                bytes.extend(base64::engine::general_purpose::STANDARD.decode(b).map_err(e)?);
+                bytes.extend(
+                    base64::engine::general_purpose::STANDARD
+                        .decode(b)
+                        .map_err(e)?,
+                );
             }
             // Text followed by Enter in a single write is read by full-screen TUIs as a paste, and the Enter becomes a
             // newline in the input box instead of submitting (Codex waits for input to go quiet first). Send the Enter on its
@@ -122,8 +157,15 @@ pub async fn dispatch(m: &Arc<Manager>, method: &str, p: Value) -> Result<Value,
             let mut sent = bytes.len();
             if separate_enter {
                 // Agent TUIs need a longer quiet moment than a shell does before they treat Enter as a submit.
-                let agent = m.row(&live.id).map(|r| matches!(r.kind.as_str(), "claude" | "codex" | "grok")).unwrap_or(false);
-                let delay = p.get("enter_delay_ms").and_then(|v| v.as_u64()).unwrap_or(if agent { 1500 } else { 150 }).min(5_000);
+                let agent = m
+                    .row(&live.id)
+                    .map(|r| matches!(r.kind.as_str(), "claude" | "codex" | "grok"))
+                    .unwrap_or(false);
+                let delay = p
+                    .get("enter_delay_ms")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(if agent { 1500 } else { 150 })
+                    .min(5_000);
                 tokio::time::sleep(Duration::from_millis(delay)).await;
                 live.write_input(b"\r").map_err(e)?;
                 sent += 1;
@@ -149,20 +191,31 @@ pub async fn dispatch(m: &Arc<Manager>, method: &str, p: Value) -> Result<Value,
         "screen" => Ok(json!({"text": m.screen_of(s(&p, "id")?).map_err(e)?})),
         "snapshot" => {
             let (bytes, cols, rows, running) = m.snapshot_of(s(&p, "id")?).map_err(e)?;
-            Ok(json!({"b64": base64::engine::general_purpose::STANDARD.encode(bytes), "cols": cols, "rows": rows, "running": running}))
+            Ok(
+                json!({"b64": base64::engine::general_purpose::STANDARD.encode(bytes), "cols": cols, "rows": rows, "running": running}),
+            )
         }
         "search" => {
             let query = s(&p, "query")?.to_string();
-            let limit = p.get("limit").and_then(|v| v.as_u64()).unwrap_or(100).clamp(1, 1000) as usize;
+            let limit = p
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(100)
+                .clamp(1, 1000) as usize;
             let m = m.clone();
-            let hits = tokio::task::spawn_blocking(move || m.search(&query, limit)).await.map_err(e)?.map_err(e)?;
+            let hits = tokio::task::spawn_blocking(move || m.search(&query, limit))
+                .await
+                .map_err(e)?
+                .map_err(e)?;
             Ok(json!({"hits": hits}))
         }
         "commands" => {
             let id = m.resolve(s(&p, "id")?).map_err(e)?;
             let n = p.get("limit").and_then(|v| v.as_i64()).unwrap_or(100);
             let rows = m.db.commands(&id, n).map_err(e)?;
-            Ok(json!({"commands": rows.into_iter().map(|(ts, t)| json!({"ts": ts, "text": t})).collect::<Vec<_>>()}))
+            Ok(
+                json!({"commands": rows.into_iter().map(|(ts, t)| json!({"ts": ts, "text": t})).collect::<Vec<_>>()}),
+            )
         }
         "events" => {
             let id = match opt_s(&p, "id") {
@@ -177,17 +230,28 @@ pub async fn dispatch(m: &Arc<Manager>, method: &str, p: Value) -> Result<Value,
                 Some(v) if v.is_object() => Some(serde_json::from_value(v.clone()).map_err(e)?),
                 _ => None,
             };
-            m.set_meta(s(&p, "id")?, opt_s(&p, "name").map(String::from), labels, opt_s(&p, "restart").map(String::from)).map_err(e)?;
+            m.set_meta(
+                s(&p, "id")?,
+                opt_s(&p, "name").map(String::from),
+                labels,
+                opt_s(&p, "restart").map(String::from),
+            )
+            .map_err(e)?;
             Ok(json!({"ok": true}))
         }
         "set_agent" => {
-            m.set_agent(s(&p, "id")?, s(&p, "agent_session_id")?).map_err(e)?;
+            m.set_agent(s(&p, "id")?, s(&p, "agent_session_id")?)
+                .map_err(e)?;
             Ok(json!({"ok": true}))
         }
         "wait" => {
             let key = m.resolve(s(&p, "id")?).map_err(e)?;
             let pat = s(&p, "pattern")?.to_string();
-            let timeout = p.get("timeout_ms").and_then(|v| v.as_u64()).unwrap_or(30_000).min(600_000);
+            let timeout = p
+                .get("timeout_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(30_000)
+                .min(600_000);
             let deadline = std::time::Instant::now() + Duration::from_millis(timeout);
             loop {
                 let live = m.running(&key).ok();
@@ -195,18 +259,28 @@ pub async fn dispatch(m: &Arc<Manager>, method: &str, p: Value) -> Result<Value,
                     Some(l) => l.screen_text(),
                     None => m.screen_of(&key).map_err(e)?,
                 };
-                let tail = m.logs_raw(&key, 16384).map(|b| strip_ansi(&b)).unwrap_or_default();
+                let tail = m
+                    .logs_raw(&key, 16384)
+                    .map(|b| strip_ansi(&b))
+                    .unwrap_or_default();
                 if text.contains(&pat) || tail.contains(&pat) {
                     return Ok(json!({"matched": true, "screen": text}));
                 }
                 if live.is_none() || std::time::Instant::now() >= deadline {
-                    return Ok(json!({"matched": false, "running": live.is_some(), "screen": text}));
+                    return Ok(
+                        json!({"matched": false, "running": live.is_some(), "screen": text}),
+                    );
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
         "shutdown" => {
-            m.shutdown(p.get("kill_sessions").and_then(|v| v.as_bool()).unwrap_or(false), opt_s(&p, "spare"));
+            m.shutdown(
+                p.get("kill_sessions")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                opt_s(&p, "spare"),
+            );
             tokio::spawn(async {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 std::process::exit(0);

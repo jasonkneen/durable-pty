@@ -1,5 +1,5 @@
 use crate::paths;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -10,11 +10,16 @@ fn exe() -> Result<PathBuf> {
 }
 
 fn plist_path() -> PathBuf {
-    dirs::home_dir().unwrap_or_default().join("Library/LaunchAgents").join(format!("{LABEL}.plist"))
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join("Library/LaunchAgents")
+        .join(format!("{LABEL}.plist"))
 }
 
 fn unit_path() -> PathBuf {
-    dirs::home_dir().unwrap_or_default().join(".config/systemd/user/durable-pty.service")
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".config/systemd/user/durable-pty.service")
 }
 
 pub fn install(http: Option<&str>) -> Result<()> {
@@ -57,12 +62,22 @@ pub fn install(http: Option<&str>) -> Result<()> {
         );
         std::fs::write(&p, xml)?;
         let uid = unsafe { libc::getuid() };
-        let _ = Command::new("launchctl").args(["bootout", &format!("gui/{uid}/{LABEL}")]).output();
-        let out = Command::new("launchctl").args(["bootstrap", &format!("gui/{uid}"), &p.to_string_lossy()]).output()?;
+        let _ = Command::new("launchctl")
+            .args(["bootout", &format!("gui/{uid}/{LABEL}")])
+            .output();
+        let out = Command::new("launchctl")
+            .args(["bootstrap", &format!("gui/{uid}"), &p.to_string_lossy()])
+            .output()?;
         if !out.status.success() {
-            bail!("launchctl bootstrap failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+            bail!(
+                "launchctl bootstrap failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
         }
-        println!("installed {} — starts at login and restarts if it exits", p.display());
+        println!(
+            "installed {} — starts at login and restarts if it exits",
+            p.display()
+        );
     } else if cfg!(target_os = "linux") {
         let p = unit_path();
         std::fs::create_dir_all(p.parent().unwrap())?;
@@ -74,13 +89,23 @@ pub fn install(http: Option<&str>) -> Result<()> {
             log = log.display(),
         );
         std::fs::write(&p, unit)?;
-        for a in [vec!["daemon-reload"], vec!["enable", "--now", "durable-pty.service"]] {
+        for a in [
+            vec!["daemon-reload"],
+            vec!["enable", "--now", "durable-pty.service"],
+        ] {
             let out = Command::new("systemctl").arg("--user").args(&a).output()?;
             if !out.status.success() {
-                bail!("systemctl {} failed: {}", a.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+                bail!(
+                    "systemctl {} failed: {}",
+                    a.join(" "),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
             }
         }
-        println!("installed {} — starts at login and restarts if it exits", p.display());
+        println!(
+            "installed {} — starts at login and restarts if it exits",
+            p.display()
+        );
     } else {
         bail!("install is supported on macOS and Linux");
     }
@@ -90,12 +115,19 @@ pub fn install(http: Option<&str>) -> Result<()> {
 pub fn uninstall() -> Result<()> {
     if cfg!(target_os = "macos") {
         let uid = unsafe { libc::getuid() };
-        let _ = Command::new("launchctl").args(["bootout", &format!("gui/{uid}/{LABEL}")]).output();
+        let _ = Command::new("launchctl")
+            .args(["bootout", &format!("gui/{uid}/{LABEL}")])
+            .output();
         let _ = std::fs::remove_file(plist_path());
     } else {
-        let _ = Command::new("systemctl").args(["--user", "disable", "--now", "durable-pty.service"]).output();
+        let _ = Command::new("systemctl")
+            .args(["--user", "disable", "--now", "durable-pty.service"])
+            .output();
         let _ = std::fs::remove_file(unit_path());
     }
-    println!("uninstalled (sessions and history in {} are kept)", paths::home().display());
+    println!(
+        "uninstalled (sessions and history in {} are kept)",
+        paths::home().display()
+    );
     Ok(())
 }

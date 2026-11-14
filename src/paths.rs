@@ -6,7 +6,9 @@ pub fn home() -> PathBuf {
     if let Ok(p) = std::env::var("DPTY_HOME") {
         return PathBuf::from(p);
     }
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")).join(".durable-pty")
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".durable-pty")
 }
 
 pub fn ensure_home() -> std::io::Result<PathBuf> {
@@ -42,7 +44,11 @@ pub fn token() -> String {
         }
     }
     let _ = ensure_home();
-    let t = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+    let t = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
     let _ = fs::write(&f, &t);
     let _ = fs::set_permissions(&f, fs::Permissions::from_mode(0o600));
     t

@@ -7,7 +7,7 @@
 //! Frames reuse the daemon's framing, [type u8][len u32 BE][payload].
 use crate::paths;
 use crate::proto::{read_frame_blocking, write_frame_blocking};
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -93,9 +93,10 @@ fn echo_on(master: &(dyn MasterPty + Send)) -> bool {
 fn send(inner: &mut Inner, t: u8, payload: &[u8]) {
     if let Some(c) = inner.client.as_mut()
         && write_frame_blocking(c, t, payload).is_err()
-            && let Some(c) = inner.client.take() {
-                let _ = c.shutdown(std::net::Shutdown::Both);
-            }
+        && let Some(c) = inner.client.take()
+    {
+        let _ = c.shutdown(std::net::Shutdown::Both);
+    }
 }
 
 pub fn run(spec_file: &str) -> anyhow::Result<()> {
@@ -116,7 +117,12 @@ fn run_spec(spec: ShimSpec) -> anyhow::Result<()> {
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
     }
 
-    let pty = native_pty_system().openpty(PtySize { rows: spec.rows, cols: spec.cols, pixel_width: 0, pixel_height: 0 })?;
+    let pty = native_pty_system().openpty(PtySize {
+        rows: spec.rows,
+        cols: spec.cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    })?;
     let mut cmd = CommandBuilder::new(&spec.cmd);
     cmd.args(&spec.args);
     cmd.env_clear();
@@ -131,7 +137,10 @@ fn run_spec(spec: ShimSpec) -> anyhow::Result<()> {
     }
     cmd.env("DPTY_SESSION", &spec.id);
     cmd.cwd(&spec.cwd);
-    let mut child = pty.slave.spawn_command(cmd).map_err(|e| anyhow::anyhow!("could not start '{}': {e}", spec.cmd))?;
+    let mut child = pty
+        .slave
+        .spawn_command(cmd)
+        .map_err(|e| anyhow::anyhow!("could not start '{}': {e}", spec.cmd))?;
     drop(pty.slave);
     let mut reader = pty.master.try_clone_reader()?;
     let writer = Arc::new(Mutex::new(pty.master.take_writer()?));
@@ -213,12 +222,16 @@ fn run_spec(spec: ShimSpec) -> anyhow::Result<()> {
     {
         let inner = inner.clone();
         let id = spec.id.clone();
-        std::thread::spawn(move || loop {
-            std::thread::sleep(Duration::from_secs(600));
-            let g = lock(&inner);
-            if g.client.is_none() && g.exited_at.is_some_and(|t| t.elapsed() > LINGER_AFTER_EXIT) {
-                cleanup(&id);
-                std::process::exit(0);
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_secs(600));
+                let g = lock(&inner);
+                if g.client.is_none()
+                    && g.exited_at.is_some_and(|t| t.elapsed() > LINGER_AFTER_EXIT)
+                {
+                    cleanup(&id);
+                    std::process::exit(0);
+                }
             }
         });
     }
@@ -248,7 +261,9 @@ fn serve(
     id: &str,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let Ok((D_HELLO, hello)) = read_frame_blocking(&mut stream) else { return };
+    let Ok((D_HELLO, hello)) = read_frame_blocking(&mut stream) else {
+        return;
+    };
     if hello.len() != 8 {
         return;
     }
@@ -302,8 +317,16 @@ fn serve(
                 let _ = w.flush();
             }
             Ok((D_RESIZE, d)) if d.len() == 4 => {
-                let (cols, rows) = (u16::from_be_bytes([d[0], d[1]]), u16::from_be_bytes([d[2], d[3]]));
-                let _ = lock(&master).resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+                let (cols, rows) = (
+                    u16::from_be_bytes([d[0], d[1]]),
+                    u16::from_be_bytes([d[2], d[3]]),
+                );
+                let _ = lock(&master).resize(PtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                });
                 let mut g = lock(&inner);
                 g.cols = cols;
                 g.rows = rows;

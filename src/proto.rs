@@ -24,8 +24,18 @@ pub struct Response {
 impl Response {
     pub fn from(id: Value, r: Result<Value, String>) -> Self {
         match r {
-            Ok(v) => Response { id, ok: true, result: Some(v), error: None },
-            Err(e) => Response { id, ok: false, result: None, error: Some(e) },
+            Ok(v) => Response {
+                id,
+                ok: true,
+                result: Some(v),
+                error: None,
+            },
+            Err(e) => Response {
+                id,
+                ok: false,
+                result: None,
+                error: Some(e),
+            },
         }
     }
 }
@@ -34,12 +44,19 @@ impl Response {
 // server -> client
 pub const S_DATA: u8 = 0;
 pub const S_EXIT: u8 = 1; // payload: i32 BE exit code
+/// Only for a client that asked for `"history": "raw"`: recent output exactly as the program wrote it, sent before the
+/// screen. For clients that keep their own model of the screen; a real terminal would answer the queries in it again.
+pub const S_HISTORY: u8 = 2;
 // client -> server
 pub const C_INPUT: u8 = 0;
 pub const C_RESIZE: u8 = 1; // payload: cols u16 BE, rows u16 BE
 pub const C_DETACH: u8 = 2;
 
-pub async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, t: u8, payload: &[u8]) -> std::io::Result<()> {
+pub async fn write_frame<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    t: u8,
+    payload: &[u8],
+) -> std::io::Result<()> {
     let mut buf = Vec::with_capacity(5 + payload.len());
     buf.push(t);
     buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
@@ -53,7 +70,10 @@ pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> std::io::Result<(u8,
     r.read_exact(&mut h).await?;
     let len = u32::from_be_bytes([h[1], h[2], h[3], h[4]]) as usize;
     if len > 4 * 1024 * 1024 {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "frame too large"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "frame too large",
+        ));
     }
     let mut p = vec![0u8; len];
     r.read_exact(&mut p).await?;
@@ -61,7 +81,11 @@ pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> std::io::Result<(u8,
 }
 
 /// Blocking twins of the frame helpers, for the shim, which has no async runtime.
-pub fn write_frame_blocking<W: std::io::Write>(w: &mut W, t: u8, payload: &[u8]) -> std::io::Result<()> {
+pub fn write_frame_blocking<W: std::io::Write>(
+    w: &mut W,
+    t: u8,
+    payload: &[u8],
+) -> std::io::Result<()> {
     let mut buf = Vec::with_capacity(5 + payload.len());
     buf.push(t);
     buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
@@ -75,7 +99,10 @@ pub fn read_frame_blocking<R: std::io::Read>(r: &mut R) -> std::io::Result<(u8, 
     r.read_exact(&mut h)?;
     let len = u32::from_be_bytes([h[1], h[2], h[3], h[4]]) as usize;
     if len > 4 * 1024 * 1024 {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "frame too large"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "frame too large",
+        ));
     }
     let mut p = vec![0u8; len];
     r.read_exact(&mut p)?;
