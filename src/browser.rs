@@ -889,6 +889,7 @@ impl Icons {
         match (session.status.as_str(), session.exit_code) {
             ("running", _) => ("●", Color::Green),
             ("lost", _) => (self.pick("!", "\u{f071}"), Color::Yellow),
+            ("hibernated", _) => (self.pick("z", "\u{f186}"), Color::Cyan),
             (_, Some(0) | None) => (self.pick("○", "\u{f00c}"), DIM),
             _ => (self.pick("✕", "\u{f00d}"), Color::Red),
         }
@@ -940,7 +941,7 @@ fn ago(ms: i64) -> String {
 /// The state in words, for where there is room: "running", "lost", "exited", "exit 3".
 fn status_text(session: &Session) -> String {
     match (session.status.as_str(), session.exit_code) {
-        ("running" | "lost", _) | (_, Some(0) | None) => session.status.clone(),
+        ("running" | "lost" | "hibernated", _) | (_, Some(0) | None) => session.status.clone(),
         (_, Some(code)) => format!("exit {code}"),
     }
 }

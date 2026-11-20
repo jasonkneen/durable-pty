@@ -58,6 +58,10 @@ fn tools() -> Value {
          "inputSchema": {"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}},
         {"name": "pty_restart", "description": "Relaunch a session; resumes the agent conversation when the agent session id is known.",
          "inputSchema": {"type": "object", "required": ["id"], "properties": {"id": id}}},
+        {"name": "pty_hibernate", "description": "Save a session (screen, scrollback, directory, environment, the command a shell is running) and stop its program. pty_recall brings it back.",
+         "inputSchema": {"type": "object", "required": ["id"], "properties": {"id": id}}},
+        {"name": "pty_recall", "description": "Bring back a hibernated or ended session: a shell reopens in its directory and re-runs the command it was running.",
+         "inputSchema": {"type": "object", "required": ["id"], "properties": {"id": id}}},
         {"name": "pty_kill", "description": "Stop a session's process (optional signal such as TERM or KILL).",
          "inputSchema": {"type": "object", "required": ["id"], "properties": {"id": id, "signal": {"type": "string"}}}}
     ])
@@ -74,6 +78,8 @@ fn tool_to_rpc(name: &str) -> Option<&'static str> {
         "pty_history" => "commands",
         "pty_search" => "search",
         "pty_restart" => "restart",
+        "pty_hibernate" => "hibernate",
+        "pty_recall" => "recall",
         "pty_kill" => "kill",
         _ => return None,
     })

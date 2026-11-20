@@ -52,9 +52,10 @@ to 8 MB, in order, with no repeats) and carries on. `dpty stop` leaves sessions 
 | Reboot / logout (the programs are gone) | Sessions and history survive. On the next start, agent sessions are relaunched with their resume command and shells come back in the directory they were last in, with scrollback replayed. |
 | Agent sessions | claude gets `--session-id <uuid>` at launch (so the id is known immediately); codex ids are found by scanning `~/.codex/sessions`. After a reboot: `claude --resume <id>`, `codex resume <id>`, original prompt dropped, other flags kept. If a resume fails straight away, a fresh conversation is started instead of looping. Other agents: `--kind` / `--resume-cmd "grok --resume {id}"`. A hook can report ids: `dpty tag-agent "$DPTY_SESSION" <id>`. |
 | Session titles | When a program sets the terminal title (claude and codex do this with the thread name), it is stored as the session's `title` and shown in `dpty ls` / `pty_list`, with a `title` event on each change. `name` stays as you set it. |
+| Hibernate / recall | `dpty hibernate <id>` saves the session (screen, scrollback, directory, environment, and for a shell the command it is running) and stops its program; it shows as `hibernated` and stays that way through daemon restarts and reboots. `dpty recall <id>` brings it back: a shell reopens in its directory, replays its scrollback and re-runs that command; an agent resumes its conversation. MCP: `pty_hibernate`, `pty_recall`. |
 | Crash loop | At most 5 automatic restarts per 60 s, then it gives up and records `restart-loop`. |
 
-Not possible: keeping a program alive through a reboot or a killed shim. History, directory and agent resume are what survive.
+Not possible: keeping a program alive through a reboot or a killed shim. History, directory, the command a shell was running (re-run when it comes back) and agent resume are what survive. A program's memory is not kept: macOS has no way to image a live process (Linux has CRIU; dpty does not use it yet).
 
 ## Surfaces
 
@@ -62,7 +63,7 @@ Not possible: keeping a program alive through a reboot or a killed shim. History
 * **HTTP** (default `127.0.0.1:7878`, bearer token from `dpty token`, `--no-http` to disable):
   `POST /rpc`, `GET /ws?id=&cols=&rows=&token=` (binary = terminal bytes, text = JSON control `{"type":"resize",…}`),
   `POST /mcp` (streamable HTTP), `GET /sse` + `POST /messages` (legacy SSE), `GET /health`.
-* **MCP tools**: `pty_list pty_new pty_send pty_screen pty_logs pty_wait pty_history pty_search pty_restart pty_kill`.
+* **MCP tools**: `pty_list pty_new pty_send pty_screen pty_logs pty_wait pty_history pty_search pty_restart pty_hibernate pty_recall pty_kill`.
 
 A command run inside a session cannot attach to, type into, resize, stop, restart or delete that same session, and the browser marks it "you are here". This applies to the command line, the browser and `dpty mcp`; requests over HTTP/WebSocket cannot be traced to a session and are not covered.
 

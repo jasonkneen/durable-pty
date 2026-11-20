@@ -149,6 +149,8 @@ pub struct Live {
     removed: AtomicBool,
     /// The current launch is an attempt to resume an agent conversation.
     resuming: AtomicBool,
+    /// Set by `hibernate`: the program is being stopped on purpose, to be brought back by `recall`.
+    hibernating: AtomicBool,
     /// Process that owns the PTY. Zero until the daemon is connected to it.
     shim_pid: AtomicU32,
     out_tx: std_mpsc::Sender<OutMsg>,
@@ -729,6 +731,7 @@ impl Manager {
             last_active_ms: now,
             restarts: 0,
             live_cwd: None,
+            live_job: None,
             title: None,
         };
         agents::prepare(&mut row);
@@ -778,6 +781,7 @@ impl Manager {
             force_restart: AtomicBool::new(false),
             removed: AtomicBool::new(false),
             resuming: AtomicBool::new(false),
+            hibernating: AtomicBool::new(false),
             shim_pid: AtomicU32::new(0),
             out_tx: self.out_tx.clone(),
             db: self.db.clone(),
@@ -1106,16 +1110,39 @@ impl Manager {
             }
             m.restarts += 1;
         }
-        if let Err(e) = self.start_proc(live).await {
-            live.emit(format!("\r\n[durable-pty: restart failed: {e}]\r\n").as_bytes());
-            self.db
-                .add_event(Some(&live.id), "restart-failed", &e.to_string());
-            self.finalize(live, -1, false);
+        let job = {
+            let mut m = lock(&live.meta);
+            if m.kind == "shell" {
+                m.live_job.take()
+            } else {
+                None
+            }
+        };
+        match self.start_proc(live).await {
+            Ok(()) => {
+                // The shell reads this once it is up, as if it had been typed: the program it was running comes back.
+                if let Some(job) = job {
+                    let line = crate::util::shell_quote(&job);
+                    let _ = live.write_input(format!("{line}\r").as_bytes());
+                    self.db.add_event(Some(&live.id), "job-rerun", &line);
+                }
+            }
+            Err(e) => self.start_failed(live, e),
         }
     }
 
+    fn start_failed(&self, live: &Arc<Live>, e: anyhow::Error) {
+        live.emit(format!("\r\n[durable-pty: restart failed: {e}]\r\n").as_bytes());
+        self.db
+            .add_event(Some(&live.id), "restart-failed", &e.to_string());
+        self.finalize(live, -1, false);
+    }
+
     fn finalize(&self, live: &Arc<Live>, code: i32, lost: bool) {
-        if lost {
+        let hibernated = live.hibernating.load(Ordering::SeqCst);
+        if hibernated {
+            live.emit(b"\r\n\x1b[38;5;244m[hibernated: `dpty recall` brings it back]\x1b[0m\r\n");
+        } else if lost {
             live.emit(b"\r\n\x1b[38;5;244m[the session's helper process disappeared: the program is gone]\x1b[0m\r\n");
         } else {
             live.emit(
@@ -1125,7 +1152,13 @@ impl Manager {
         }
         {
             let mut m = lock(&live.meta);
-            m.status = if lost { "lost".into() } else { "exited".into() };
+            m.status = if hibernated {
+                "hibernated".into()
+            } else if lost {
+                "lost".into()
+            } else {
+                "exited".into()
+            };
             m.exit_code = if lost { None } else { Some(code) };
             m.ended_ms = Some(now_ms());
             m.pid = None;
@@ -1139,7 +1172,13 @@ impl Manager {
         lock(&self.live).remove(&live.id);
         self.db.add_event(
             Some(&live.id),
-            if lost { "lost" } else { "exited" },
+            if hibernated {
+                "hibernated"
+            } else if lost {
+                "lost"
+            } else {
+                "exited"
+            },
             &if lost {
                 "helper process disappeared".to_string()
             } else {
@@ -1188,6 +1227,28 @@ impl Manager {
         self.db.delete_session(&id)?;
         self.db.add_event(None, "removed", &id);
         Ok(())
+    }
+
+    /// Saves what a session needs to come back (screen, scrollback, directory, environment, the command a shell is
+    /// running, an agent's conversation id), then stops its program. `recall` (a restart) brings it back: a shell
+    /// reopens where it was and re-runs that command. The program's memory is not kept; nothing on macOS can image a
+    /// live process.
+    pub fn hibernate(self: &Arc<Self>, key: &str) -> Result<()> {
+        let live = self.running(key)?;
+        self.capture(&live);
+        live.hibernating.store(true, Ordering::SeqCst);
+        live.user_killed.store(true, Ordering::SeqCst);
+        let m = lock(&live.meta).clone();
+        self.db.upsert_session(&m)?;
+        self.db.add_event(
+            Some(&live.id),
+            "hibernating",
+            &m.live_job
+                .as_deref()
+                .map(crate::util::shell_quote)
+                .unwrap_or_default(),
+        );
+        self.stop_process(&live)
     }
 
     /// Relaunches a session, resuming the agent conversation when we know its id.
@@ -1453,6 +1514,7 @@ impl Manager {
             for r in self.db.list_sessions().unwrap_or_default() {
                 let stale = matches!(r.kind.as_str(), "shell" | "process")
                     && r.status != "running"
+                    && r.status != "hibernated"
                     && !r.labels.contains_key("keep")
                     && self.live(&r.id).is_none_or(|l| !l.is_running())
                     && now - r.ended_ms.unwrap_or(r.last_active_ms) > exited_ms;
@@ -1484,17 +1546,29 @@ impl Manager {
             if let Some((b, offset)) = snap {
                 let _ = self.db.set_screen(&l.id, &b, offset);
             }
-            {
-                let mut m = lock(&l.meta);
-                if !matches!(m.kind.as_str(), "claude" | "codex" | "grok")
-                    && let Some(pid) = m.pid.filter(|p| *p > 0)
-                    && let Some(d) = crate::util::process_cwd(pid)
-                {
-                    m.live_cwd = Some(d);
-                }
+            // A hibernating shell is being stopped: what it was running was captured first and must not be cleared.
+            if !l.hibernating.load(Ordering::SeqCst) {
+                self.capture(&l);
             }
             let m = lock(&l.meta).clone();
             let _ = self.db.upsert_session(&m);
+        }
+    }
+
+    /// Records where a shell or plain process is, and for a shell the command it is running.
+    fn capture(&self, l: &Arc<Live>) {
+        let mut m = lock(&l.meta);
+        if matches!(m.kind.as_str(), "claude" | "codex" | "grok") {
+            return;
+        }
+        let Some(pid) = m.pid.filter(|p| *p > 0) else {
+            return;
+        };
+        if let Some(d) = crate::util::process_cwd(pid) {
+            m.live_cwd = Some(d);
+        }
+        if m.kind == "shell" {
+            m.live_job = crate::util::child_job(pid);
         }
     }
 

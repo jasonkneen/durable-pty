@@ -34,4 +34,7 @@ pub struct SessionRow {
     /// Latest terminal title the program set (OSC 0/2), e.g. an agent's thread name.
     #[serde(default)]
     pub title: Option<String>,
+    /// The command a shell was running (argv of its foreground child), re-run in it when the shell is brought back.
+    #[serde(default)]
+    pub live_job: Option<Vec<String>>,
 }

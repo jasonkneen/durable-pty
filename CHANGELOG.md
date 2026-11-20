@@ -6,6 +6,9 @@ versions follow [Semantic Versioning](https://semver.org/). Notes under "Unrelea
 
 ## Unreleased
 
+- `dpty hibernate <id>` saves a session to disk and stops its program; `dpty recall <id>` brings it back. A recalled shell reopens in its directory with its scrollback and re-runs the command it was running (for example `npm run dev`). Hibernated sessions stay asleep through daemon restarts and reboots and are never removed by automatic cleanup. RPC `hibernate`/`recall`, MCP `pty_hibernate`/`pty_recall`. The program's memory is not kept.
+- A shell brought back after a reboot or a lost helper also re-runs the command it was running.
+
 - Idle and exited shell sessions are now removed automatically by default: idle, unattached shells with nothing running after 24 h (`DPTY_IDLE_SHELL_SECS`), ended shell/process sessions 7 days after they ended (`DPTY_EXITED_KEEP_SECS`). Their history goes with them. Set either to `0` to turn it off. Agent sessions and anything labelled `keep` are still never removed.
 
 ## 0.2.1 (2026-11-14)

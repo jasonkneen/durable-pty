@@ -48,7 +48,7 @@ pub struct Db {
     conn: Mutex<Connection>,
 }
 
-const COLS: &str = "id,name,cmd,args,cwd,env,labels,kind,agent_session_id,resume_cmd,restart,status,exit_code,pid,cols,rows,created_ms,started_ms,ended_ms,last_active_ms,restarts,live_cwd,title";
+const COLS: &str = "id,name,cmd,args,cwd,env,labels,kind,agent_session_id,resume_cmd,restart,status,exit_code,pid,cols,rows,created_ms,started_ms,ended_ms,last_active_ms,restarts,live_cwd,title,live_job";
 
 fn row_to_session(r: &Row) -> rusqlite::Result<SessionRow> {
     let json = |i: usize| -> rusqlite::Result<String> { r.get(i) };
@@ -76,6 +76,9 @@ fn row_to_session(r: &Row) -> rusqlite::Result<SessionRow> {
         restarts: r.get::<_, i64>(20)? as u32,
         live_cwd: r.get(21)?,
         title: r.get(22)?,
+        live_job: r
+            .get::<_, Option<String>>(23)?
+            .and_then(|j| serde_json::from_str(&j).ok()),
     })
 }
 
@@ -105,6 +108,12 @@ impl Db {
         if !has_title {
             c.execute_batch("ALTER TABLE sessions ADD COLUMN title TEXT")?;
         }
+        let has_job: bool = c
+            .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name='live_job'")?
+            .exists([])?;
+        if !has_job {
+            c.execute_batch("ALTER TABLE sessions ADD COLUMN live_job TEXT")?;
+        }
         Ok(Db {
             conn: Mutex::new(c),
         })
@@ -116,14 +125,15 @@ impl Db {
 
     pub fn upsert_session(&self, s: &SessionRow) -> Result<()> {
         self.c().execute(
-            &format!("INSERT INTO sessions ({COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)
+            &format!("INSERT INTO sessions ({COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)
              ON CONFLICT(id) DO UPDATE SET name=?2,cmd=?3,args=?4,cwd=?5,env=?6,labels=?7,kind=?8,agent_session_id=?9,resume_cmd=?10,
-             restart=?11,status=?12,exit_code=?13,pid=?14,cols=?15,rows=?16,started_ms=?18,ended_ms=?19,last_active_ms=?20,restarts=?21,live_cwd=?22,title=?23"),
+             restart=?11,status=?12,exit_code=?13,pid=?14,cols=?15,rows=?16,started_ms=?18,ended_ms=?19,last_active_ms=?20,restarts=?21,live_cwd=?22,title=?23,live_job=?24"),
             params![
                 s.id, s.name, s.cmd, serde_json::to_string(&s.args)?, s.cwd, serde_json::to_string(&s.env)?,
                 serde_json::to_string(&s.labels)?, s.kind, s.agent_session_id, s.resume_cmd, s.restart, s.status,
                 s.exit_code, s.pid.map(|p| p as i64), s.cols as i64, s.rows as i64, s.created_ms, s.started_ms,
-                s.ended_ms, s.last_active_ms, s.restarts as i64, s.live_cwd, s.title
+                s.ended_ms, s.last_active_ms, s.restarts as i64, s.live_cwd, s.title,
+                s.live_job.as_ref().map(serde_json::to_string).transpose()?
             ],
         )?;
         Ok(())

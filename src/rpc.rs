@@ -49,7 +49,10 @@ pub async fn dispatch_from(
         }
         return Ok(out);
     }
-    let guarded = matches!(method, "kill" | "rm" | "restart" | "send" | "resize");
+    let guarded = matches!(
+        method,
+        "kill" | "rm" | "restart" | "recall" | "hibernate" | "send" | "resize"
+    );
     if !guarded && !matches!(method, "shutdown" | "list" | "get") {
         return dispatch(m, method, p).await;
     }
@@ -122,8 +125,12 @@ pub async fn dispatch(m: &Arc<Manager>, method: &str, p: Value) -> Result<Value,
             m.remove(s(&p, "id")?).map_err(e)?;
             Ok(json!({"ok": true}))
         }
-        "restart" => {
+        "restart" | "recall" => {
             m.restart(s(&p, "id")?).await.map_err(e)?;
+            Ok(json!({"ok": true}))
+        }
+        "hibernate" => {
+            m.hibernate(s(&p, "id")?).map_err(e)?;
             Ok(json!({"ok": true}))
         }
         "send" => {

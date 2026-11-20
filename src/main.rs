@@ -123,6 +123,14 @@ enum Cmd {
     Restart {
         id: String,
     },
+    /// Save a session to disk and stop its program; `recall` brings it back (a shell re-runs what it was running)
+    Hibernate {
+        id: String,
+    },
+    /// Bring back a hibernated (or ended) session
+    Recall {
+        id: String,
+    },
     /// Type into a session
     Send {
         id: String,
@@ -459,12 +467,12 @@ fn print_processes(rows: &[Value]) {
 
 fn print_table(sessions: &[Value]) {
     println!(
-        "{:<9} {:<18} {:<8} {:<8} {:<7} {:<5} {:<30} {:<38} CWD",
+        "{:<9} {:<18} {:<8} {:<10} {:<7} {:<5} {:<30} {:<38} CWD",
         "ID", "NAME", "KIND", "STATUS", "PID", "AGE", "TITLE", "AGENT SESSION"
     );
     for s in sessions {
         println!(
-            "{:<9} {:<18} {:<8} {:<8} {:<7} {:<5} {:<30} {:<38} {}",
+            "{:<9} {:<18} {:<8} {:<10} {:<7} {:<5} {:<30} {:<38} {}",
             s["id"].as_str().unwrap_or(""),
             s["name"].as_str().unwrap_or(""),
             s["kind"].as_str().unwrap_or(""),
@@ -630,6 +638,12 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Restart { id } => {
             call("restart", json!({"id": id})).await?;
+        }
+        Cmd::Hibernate { id } => {
+            call("hibernate", json!({"id": id})).await?;
+        }
+        Cmd::Recall { id } => {
+            call("recall", json!({"id": id})).await?;
         }
         Cmd::Send {
             id,

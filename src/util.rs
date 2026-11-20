@@ -668,6 +668,60 @@ fn macos_argv(pid: u32) -> Option<Vec<String>> {
     (!args.is_empty()).then_some(args)
 }
 
+/// The command line of the program a shell is running: the argv of its first child process, or `None` when the shell
+/// is idle at its prompt.
+pub fn child_job(pid: u32) -> Option<Vec<String>> {
+    #[cfg(target_os = "linux")]
+    {
+        let kids = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")).ok()?;
+        let child: u32 = kids.split_whitespace().next()?.parse().ok()?;
+        let raw = std::fs::read(format!("/proc/{child}/cmdline")).ok()?;
+        let args: Vec<String> = raw
+            .split(|b| *b == 0)
+            .filter(|s| !s.is_empty())
+            .map(|s| String::from_utf8_lossy(s).into_owned())
+            .collect();
+        (!args.is_empty()).then_some(args)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut buf = [0 as libc::pid_t; 64];
+        let size = std::mem::size_of_val(&buf) as libc::c_int;
+        // SAFETY: buf is `size` bytes; proc_listchildpids writes at most that many and returns the count.
+        let n = unsafe {
+            libc::proc_listchildpids(
+                pid as libc::pid_t,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                size,
+            )
+        };
+        let child = *buf.get(..n.max(0) as usize)?.iter().min()?;
+        macos_argv(child as u32)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// Quotes argv so a POSIX shell reads it back as the same words.
+pub fn shell_quote(args: &[String]) -> String {
+    args.iter()
+        .map(|a| {
+            if !a.is_empty()
+                && a.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_./=:,+@%".contains(c))
+            {
+                a.clone()
+            } else {
+                format!("'{}'", a.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Whether a process has any child processes (a shell running a command, job or agent).
 /// Errs on the side of "busy": if it cannot tell, it says true.
 pub fn has_children(pid: u32) -> bool {
@@ -937,5 +991,52 @@ mod tests {
             "scan reported a pid ps did not: {:?}",
             &got - &seen
         );
+    }
+}
+
+#[cfg(test)]
+mod job_tests {
+    use super::*;
+
+    #[test]
+    fn shell_quote_round_trips_awkward_words() {
+        let args: Vec<String> = ["npm", "run", "dev", "it's here", "", "a b"]
+            .map(String::from)
+            .to_vec();
+        let line = shell_quote(&args);
+        assert_eq!(line, "npm run dev 'it'\\''s here' '' 'a b'");
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("for a in {line}; do printf '[%s]' \"$a\"; done"))
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "[npm][run][dev][it's here][][a b]"
+        );
+    }
+
+    #[test]
+    fn child_job_reads_the_running_command() {
+        // A shell of its own, so other tests' child processes are not in the way. The trailing `:` keeps sh from
+        // exec'ing sleep in its place.
+        let mut shell = std::process::Command::new("sh")
+            .args(["-c", "sleep 31; :"])
+            .spawn()
+            .unwrap();
+        let mut job = None;
+        for _ in 0..50 {
+            job = child_job(shell.id());
+            if job.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let _ = std::process::Command::new("pkill")
+            .args(["-P", &shell.id().to_string()])
+            .status();
+        shell.kill().unwrap();
+        let _ = shell.wait();
+        assert_eq!(job, Some(vec!["sleep".to_string(), "31".to_string()]));
     }
 }

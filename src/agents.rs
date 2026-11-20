@@ -442,6 +442,7 @@ mod tests {
             last_active_ms: 0,
             restarts: 0,
             live_cwd: None,
+            live_job: None,
             title: None,
         }
     }
