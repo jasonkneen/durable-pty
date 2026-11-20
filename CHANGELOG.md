@@ -6,6 +6,8 @@ versions follow [Semantic Versioning](https://semver.org/). Notes under "Unrelea
 
 ## Unreleased
 
+- Idle and exited shell sessions are now removed automatically by default: idle, unattached shells with nothing running after 24 h (`DPTY_IDLE_SHELL_SECS`), ended shell/process sessions 7 days after they ended (`DPTY_EXITED_KEEP_SECS`). Their history goes with them. Set either to `0` to turn it off. Agent sessions and anything labelled `keep` are still never removed.
+
 ## 0.2.1 (2026-11-14)
 
 - Fix: the release workflow asked for a `macos-14` arm64 runner, whose label GitHub no longer serves ("The configuration 'macos-14-arm64-us-default' is not supported"), so that build was cancelled, `publish` was skipped and v0.2.0 produced no binaries. The release workflow and CI now use `macos-15` for arm64 macOS. `0.2.1` is the first release with downloads, and it contains everything listed under 0.2.0.

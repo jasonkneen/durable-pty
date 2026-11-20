@@ -71,7 +71,7 @@ A command run inside a session cannot attach to, type into, resize, stop, restar
 `~/.durable-pty/` (override with `DPTY_HOME`): `dpty.db` (sessions, 16 MB output per session, commands, events), `token`, `dpty.log`. All 0600/0700.
 Output stored by an older version is indexed once, in the background, the first time the new daemon starts. Output is also kept as plain text lines for search (`dpty` browser `/`, RPC `search`, MCP `pty_search`), covering the same span as the stored output.
 The stored environment is never returned by `list`/`get`/`pty_list`; they give the variable names only.
-Nothing is deleted automatically. To have it tidy up, set `DPTY_IDLE_SHELL_SECS` (remove a running shell that is idle, unattached and has nothing running in it) and/or `DPTY_EXITED_KEEP_SECS` (remove a shell or process session that long after it ended) in the daemon's environment. Agent sessions and anything labelled `keep` are never removed.
+The daemon tidies up by itself: a running shell that is idle, unattached and has nothing running in it is removed after 24 h (`DPTY_IDLE_SHELL_SECS`), and a shell or process session is removed 7 days after it ended (`DPTY_EXITED_KEEP_SECS`). Set either to `0` in the daemon's environment to turn it off. Agent sessions and anything labelled `keep` are never removed.
 Typed commands are not recorded while the terminal has echo off (passwords) or a full-screen app is up.
 Session environment (PATH, HOME, locale, agent API variables, plus `-e` values) is stored so recovery can relaunch; `--env-all` passes everything.
 

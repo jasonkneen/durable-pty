@@ -1424,13 +1424,13 @@ impl Manager {
         }
     }
 
-    /// Removes sessions nobody will come back to. Off unless asked for, because it deletes history. A running plain
+    /// Removes sessions nobody will come back to. On by default; it deletes their history. A running plain
     /// shell goes when no client is attached, it has no child processes (nothing running in it), and it has been silent
-    /// for `DPTY_IDLE_SHELL_SECS`. An exited shell/process session goes `DPTY_EXITED_KEEP_SECS` after it ended. Agent
-    /// sessions are never touched (they can be resumed), nor is anything labelled `keep`. Unset or 0 disables each.
+    /// for `DPTY_IDLE_SHELL_SECS` (default 24 h). An exited shell/process session goes `DPTY_EXITED_KEEP_SECS` (default 7 days) after it ended. Agent
+    /// sessions are never touched (they can be resumed), nor is anything labelled `keep`. 0 disables each.
     pub fn autoclean(&self) {
-        let idle_ms = crate::util::env_secs("DPTY_IDLE_SHELL_SECS", 0) as i64 * 1000;
-        let exited_ms = crate::util::env_secs("DPTY_EXITED_KEEP_SECS", 0) as i64 * 1000;
+        let idle_ms = crate::util::env_secs("DPTY_IDLE_SHELL_SECS", 24 * 3600) as i64 * 1000;
+        let exited_ms = crate::util::env_secs("DPTY_EXITED_KEEP_SECS", 7 * 24 * 3600) as i64 * 1000;
         let now = now_ms();
         let mut doomed: Vec<(String, &'static str)> = vec![];
         if idle_ms > 0 {
